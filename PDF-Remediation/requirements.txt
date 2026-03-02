@@ -1,0 +1,108 @@
+# =============================================================================
+# requirements.txt — PDF Accessibility Remediation Tool
+# =============================================================================
+# Purpose: All Python packages needed for the Streamlit-based PDF remediation
+#          tool that helps faculty make course content Title II / WCAG 2.1 AA
+#          compliant.
+#
+# Install everything at once:
+#   pip install -r requirements.txt
+#
+# Note: Tesseract OCR binary must ALSO be installed separately (see SETUP.md).
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# STREAMLIT — Web application framework
+# Used to build the interactive browser-based UI without writing HTML/JS
+# -----------------------------------------------------------------------------
+streamlit>=1.35.0
+
+
+# -----------------------------------------------------------------------------
+# PDF READING & MANIPULATION
+# Multiple libraries are included because each excels at different tasks:
+#
+#   PyMuPDF (fitz) — fastest for rendering pages as images and reading structure
+#   pdfplumber     — best for extracting text with layout/position information
+#   pypdf          — lightweight for metadata, merging, splitting PDFs
+#   pikepdf        — low-level PDF editing including accessibility tags (Tags tree)
+#   reportlab      — creates new, properly tagged accessible PDFs from scratch
+# -----------------------------------------------------------------------------
+PyMuPDF>=1.24.0
+pdfplumber>=0.11.0
+pypdf>=4.2.0
+pikepdf>=8.15.0
+reportlab>=4.2.0
+
+
+# -----------------------------------------------------------------------------
+# OCR (Optical Character Recognition)
+# Needed when PDFs contain scanned images instead of real selectable text.
+# This is one of the most common accessibility barriers in faculty course PDFs.
+#
+#   pytesseract — Python wrapper around the open-source Tesseract OCR engine
+#   pdf2image   — converts each PDF page into a PIL Image so OCR can read it
+#   easyocr     — alternative OCR engine (no separate binary needed, uses AI)
+# -----------------------------------------------------------------------------
+pytesseract>=0.3.10
+pdf2image>=1.17.0
+easyocr>=1.7.1
+
+
+# -----------------------------------------------------------------------------
+# IMAGE PROCESSING
+# Used to pre-process scanned pages before OCR (deskew, denoise, etc.)
+# and to analyze images embedded in PDFs for alt-text generation.
+#
+#   Pillow       — the standard Python image library (PIL fork)
+#   opencv-python — advanced image processing (contrast, thresholding, deskew)
+#   numpy         — numerical arrays that underlie image data
+# -----------------------------------------------------------------------------
+Pillow>=10.3.0
+opencv-python>=4.9.0.80
+numpy>=1.26.0
+
+
+# -----------------------------------------------------------------------------
+# TEXT EXTRACTION & ANALYSIS
+# Used to detect missing alt-text, reading order issues, and heading structure.
+#
+#   pdfminer.six — fine-grained text and layout extraction from PDFs
+# -----------------------------------------------------------------------------
+pdfminer.six>=20231228
+
+
+# -----------------------------------------------------------------------------
+# DATA HANDLING
+# Used to build reports, checklists, and display results in Streamlit tables.
+# -----------------------------------------------------------------------------
+pandas>=2.2.0
+
+
+# -----------------------------------------------------------------------------
+# LANGUAGE & ACCESSIBILITY ANALYSIS
+# Used to check reading level, detect language for lang attribute, and
+# suggest plain-language improvements.
+#
+#   langdetect  — detects the language of extracted text (needed for PDF /Lang)
+#   textstat    — computes Flesch-Kincaid and other readability scores
+# -----------------------------------------------------------------------------
+langdetect>=1.0.9
+textstat>=0.7.3
+
+
+# -----------------------------------------------------------------------------
+# FILE UTILITIES
+# Helpers for working with uploaded files inside the Streamlit app.
+# -----------------------------------------------------------------------------
+python-magic-bin>=0.4.14   # Windows-compatible file type detection
+openpyxl>=3.1.2            # Read/write Excel files for batch upload lists
+
+
+# -----------------------------------------------------------------------------
+# OPTIONAL — AI-ASSISTED ALT TEXT GENERATION (can be enabled later)
+# Uncomment the line below if you want to use OpenAI's vision model to
+# automatically suggest alt text for images found in PDFs.
+# -----------------------------------------------------------------------------
+# openai>=1.30.0

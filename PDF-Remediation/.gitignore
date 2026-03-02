@@ -1,0 +1,24 @@
+# =============================================================================
+# .gitignore — PDF Assistant
+# =============================================================================
+# Files and folders listed here are intentionally excluded from git.
+# They are either machine-specific, too large, or auto-generated.
+# =============================================================================
+
+# Virtual environment — created by setup.bat, large (~1 GB), machine-specific
+venv/
+
+# Python bytecode cache — auto-generated, not needed in source control
+__pycache__/
+*.py[cod]
+
+# Streamlit cache folder
+.streamlit/
+
+# Uploaded PDF files — user uploads should not be committed
+uploads/
+*.pdf
+
+# OS-generated files
+.DS_Store
+Thumbs.db
