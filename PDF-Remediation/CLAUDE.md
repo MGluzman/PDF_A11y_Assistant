@@ -16,11 +16,13 @@ of the ADA. The tool is built with Streamlit and Python.
    inform the user immediately and end the session (see Password Protection below)
 3. Analyze the file and generate a prioritized issues list
 4. Present issues using the 3-tier severity system (see below)
-5. If the document is entirely scanned (image-based), flag it as a Red Light issue
-   and stop — do not proceed further until the user decides how to continue
+5. If any page of the document is found to be scanned (image-based), flag it as a
+   Red Light issue and stop — do not proceed further until the user decides how to
+   continue (see Scanned Document Detection below)
 6. Inform the user they can choose to remediate the file (trigger OCR) or walk away
 7. If the user chooses to remediate, run OCR and then re-analyze the converted text
-8. If the user chooses to walk away, end the session without modifying the file
+8. If the user chooses to walk away, show the scanned goodbye screen — offer to
+   upload a different file or end the session entirely without modifying the file
 9. If no issues are found, display the clean document message (see No Issues Found below)
    and proceed to step 11
 10. If issues are found, display the priority recommendation (see Priority Recommendation
@@ -135,9 +137,30 @@ unexpectedly or the user stops early.
 - When the user is done and chooses their output format, deliver the final
   saved version in that format
 
+### Scanned Document Detection
+Detection uses a 2-page sampling rule to avoid false positives from decorative
+cover pages while minimizing unnecessary processing:
+
+1. Check page 1 for selectable text using PyMuPDF's `get_text()`.
+2. If page 1 has real text, the document is not scanned — proceed with full analysis.
+3. If page 1 has no text, check page 2 (if it exists).
+4. Regardless of what page 2 contains, stop analysis and require OCR first.
+
+**Design decision — OCR before everything else:**
+Even if only one page is unreadable, OCR must be completed before any accessibility
+fixes are applied. OCR can restructure page content in ways that would invalidate
+fixes made beforehand (e.g., heading tags, reading order corrections applied to a
+page that gets rebuilt by OCR). The correct order is always: make it readable first,
+then analyze, then fix.
+
+The `cover_page_only` flag is stored in session state when page 1 is unreadable but
+page 2 has real text. This allows the UI to display a slightly more accurate message
+("at least one page" vs. "your PDF"), but the outcome — ANALYSIS STOPPED — is the
+same either way.
+
 ### OCR Rule
 OCR is never run automatically. It is only triggered when:
-- The analysis identifies the document as entirely or partially scanned (image-based), AND
+- The analysis identifies one or more pages as scanned (image-based), AND
 - The user explicitly chooses to remediate the file
 
 If the user walks away, do not run OCR and do not modify the original file.
@@ -228,15 +251,35 @@ Defined Red Light issues:
   of images of text with no selectable characters. Screen readers, search, copy/paste,
   translation, and text resizing all fail completely. (WCAG 2.1 SC 1.4.5; Title II 28 CFR Part 35)
 
-  When this issue is detected, display the following message verbatim:
+  When this issue is detected, display an ANALYSIS STOPPED callout. The opening
+  line is tailored based on scope:
+  - If only page 1 is unreadable (page 2 has text): "At least one page of your
+    PDF contains text that was scanned as an image."
+  - Otherwise: "Your PDF contains text that was scanned as an image."
 
-  > "Your file appears to have text scanned as an image. This represents a serious
-  > readability problem. It is recommended that you convert your file to one with
-  > readable text. How would you like to proceed?"
+  Follow with this explanation:
+
+  > "This creates serious accessibility barriers for most users: screen readers
+  > cannot read image-based text, students cannot search or copy it, and it cannot
+  > be resized or translated. This document cannot be analyzed or improved until it
+  > is converted to a readable PDF.
+  >
+  > Would you like me to convert it now?"
 
   Then present exactly two choices:
-  1. **Yes, make my file readable.** — triggers OCR and re-analysis
-  2. **I'm not interested.** — ends the session without modifying the file
+  1. **Yes, make this document readable.** — triggers OCR and re-analysis
+  2. **No, leave it as it is.** — goes to the scanned goodbye screen (see below)
+
+  ### Scanned Goodbye Screen
+  When the user chooses not to convert their scanned document, display:
+
+  > "No problem — you can return any time to convert this document and work through
+  > its accessibility issues. If you have another PDF you'd like to check, you can
+  > upload it now."
+
+  Then present exactly two choices:
+  1. **Upload another file** — reset session state and return to the upload screen
+  2. **No, I'm done for now.** — end the session entirely
 - **Untagged PDF** — The document has no structure tags at all. Screen reader users
   receive no headings, no reading order, no landmarks — the content is effectively
   inaccessible to them. (WCAG 2.1 SC 1.3.1; Title II 28 CFR Part 35)
