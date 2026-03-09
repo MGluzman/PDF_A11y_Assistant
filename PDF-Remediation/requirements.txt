@@ -98,6 +98,7 @@ textstat>=0.7.3
 # -----------------------------------------------------------------------------
 python-magic-bin>=0.4.14   # Windows-compatible file type detection
 openpyxl>=3.1.2            # Read/write Excel files for batch upload lists
+python-docx>=1.1.0         # Create and write DOCX files (OCR and remediation output)
 
 
 # -----------------------------------------------------------------------------

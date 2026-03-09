@@ -21,9 +21,17 @@
 #   streamlit run app.py
 # =============================================================================
 
-import time                  # Used to simulate analysis time in placeholder logic
-import fitz                  # PyMuPDF — opens PDFs, checks for password, detects scanned pages
+import io                    # In-memory byte streams for building files without writing to disk
+import time                  # Used for brief delays during state transitions
+import fitz                  # PyMuPDF — opens PDFs, renders pages as images, checks password
+import pytesseract           # Python wrapper around the Tesseract OCR binary
 import streamlit as st       # The main framework — builds the entire UI
+from PIL import Image        # Pillow — convert PyMuPDF pixel data to images pytesseract can read
+from docx import Document as DocxDocument   # python-docx — builds DOCX output files
+from reportlab.lib.pagesizes import letter  # ReportLab — builds PDF output files
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
 
 
 # -----------------------------------------------------------------------------
@@ -171,6 +179,175 @@ SEVERITY_LABELS = {
 }
 
 
+# Disclaimer appended to every OCR-converted file per CLAUDE.md OCR Step 6.
+# Informs recipients that the text was machine-extracted and may contain errors.
+OCR_DISCLAIMER = (
+    "This document was converted from a scanned image to readable text using "
+    "Tesseract OCR and Claude AI. While every effort has been made to ensure "
+    "accuracy, some errors may remain. Please review the content before distributing."
+)
+
+
+# =============================================================================
+# OCR HELPER FUNCTIONS
+# =============================================================================
+# These three functions handle the full OCR pipeline:
+#   run_ocr()    — renders each PDF page as an image and extracts text
+#   build_docx() — assembles extracted text into a downloadable DOCX file
+#   build_pdf()  — assembles extracted text into a downloadable PDF file
+#
+# Both build_* functions append the OCR_DISCLAIMER at the end per CLAUDE.md.
+# Both return raw bytes so Streamlit's st.download_button can serve them
+# directly without writing anything to disk.
+# =============================================================================
+
+def run_ocr(file_bytes, tesseract_path):
+    """
+    Extract text from every page of a scanned PDF using Tesseract OCR.
+
+    Approach:
+      1. Configure pytesseract to use the binary at tesseract_path.
+      2. Use PyMuPDF (fitz) to render each page as a 300 DPI PNG image.
+         300 DPI gives Tesseract enough detail to read small body text accurately.
+         (72 DPI — screen resolution — is too low for reliable OCR.)
+      3. Convert each PNG to a PIL Image and pass it to pytesseract.
+      4. Return the extracted text as a list — one string per page.
+
+    Parameters:
+        file_bytes (bytes): Raw bytes of the uploaded PDF.
+        tesseract_path (str): Full path to the tesseract executable
+                              (e.g. C:\\Program Files\\Tesseract-OCR\\tesseract.exe).
+
+    Returns:
+        list[str]: Extracted text for each page, in document order.
+
+    Raises:
+        Exception: Re-raised if Tesseract cannot be found or fails to run,
+                   so the caller can show a user-facing error message.
+    """
+    # Tell pytesseract where the Tesseract binary lives.
+    # This must be set before any image_to_string() call.
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    pages_text = []
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+
+        # Render the page at 300 DPI.
+        # fitz.Matrix scales the default 72 DPI coordinate space.
+        # 300 / 72 ≈ 4.17 — each dimension is scaled up ~4x for higher resolution.
+        mat = fitz.Matrix(300 / 72, 300 / 72)
+        pix = page.get_pixmap(matrix=mat)
+
+        # Convert the raw pixel data to a PIL Image via an in-memory PNG buffer.
+        # pytesseract expects a PIL Image or a file path — we use PIL Image
+        # to avoid writing temporary files to disk.
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+        # Run OCR. lang="eng" tells Tesseract to use the English language model.
+        # In Phase 2, this could be made configurable for multilingual documents.
+        text = pytesseract.image_to_string(img, lang="eng")
+        pages_text.append(text)
+
+    doc.close()
+    return pages_text
+
+
+def build_docx(pages_text):
+    """
+    Assemble OCR-extracted page texts into a DOCX file.
+
+    Each page's text is split into lines. Non-empty lines become paragraphs.
+    A page break is inserted between pages to preserve the original pagination.
+    The OCR disclaimer is appended on a final page per CLAUDE.md OCR Step 6.
+
+    Parameters:
+        pages_text (list[str]): One text string per page from run_ocr().
+
+    Returns:
+        bytes: The completed DOCX file as raw bytes, ready for st.download_button.
+    """
+    doc = DocxDocument()
+
+    for i, page_text in enumerate(pages_text):
+        if i > 0:
+            # Insert a page break before each page after the first.
+            # add_page_break() adds a run with a page break character to a
+            # new paragraph — this is the standard python-docx approach.
+            doc.add_page_break()
+
+        for line in page_text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                doc.add_paragraph(stripped)
+
+    # Append the conversion disclaimer on its own page (CLAUDE.md OCR Step 6).
+    doc.add_page_break()
+    disclaimer_para = doc.add_paragraph(OCR_DISCLAIMER)
+    # Italicize the disclaimer to visually distinguish it from document content.
+    disclaimer_para.runs[0].italic = True
+
+    # Write the document to an in-memory buffer and return the bytes.
+    # We never write to disk — the bytes go straight to Streamlit's download.
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
+
+def build_pdf(pages_text):
+    """
+    Assemble OCR-extracted page texts into a plain-text PDF using ReportLab.
+
+    ReportLab's Platypus layout engine is used to flow text onto letter-size
+    pages with standard margins. Each original page's content is separated by
+    a PageBreak. The OCR disclaimer is appended at the end.
+
+    Parameters:
+        pages_text (list[str]): One text string per page from run_ocr().
+
+    Returns:
+        bytes: The completed PDF file as raw bytes, ready for st.download_button.
+    """
+    output = io.BytesIO()
+
+    # SimpleDocTemplate manages page layout, margins, and page breaks.
+    doc_rl = SimpleDocTemplate(
+        output,
+        pagesize=letter,
+        rightMargin=inch,
+        leftMargin=inch,
+        topMargin=inch,
+        bottomMargin=inch,
+    )
+
+    # getSampleStyleSheet() returns ReportLab's built-in paragraph styles.
+    # "Normal" is plain body text; "Italic" is used for the disclaimer.
+    styles = getSampleStyleSheet()
+    story = []  # "story" is ReportLab's term for the list of content blocks
+
+    for i, page_text in enumerate(pages_text):
+        if i > 0:
+            story.append(PageBreak())
+
+        for line in page_text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                # Paragraph() wraps text automatically within the page margins.
+                story.append(Paragraph(stripped, styles["Normal"]))
+                # Spacer adds a small gap between lines for readability.
+                story.append(Spacer(1, 4))
+
+    # Append the conversion disclaimer on its own page (CLAUDE.md OCR Step 6).
+    story.append(PageBreak())
+    story.append(Paragraph(OCR_DISCLAIMER, styles["Italic"]))
+
+    # build() renders all the story elements into the output buffer.
+    doc_rl.build(story)
+    return output.getvalue()
+
+
 # =============================================================================
 # PDF ANALYSIS — PLACEHOLDER (Phase 1)
 # =============================================================================
@@ -261,6 +438,9 @@ def init_state():
         "proposed_fix": None,       # Text of the fix shown during QA confirmation
         "reanalysis_done": False,   # Whether re-analysis was offered at the current checkpoint
         "cover_page_only": False,   # True if only page 1 is unreadable (page 2 has text)
+        "ocr_pages_text": [],       # List of strings — one per page — from run_ocr()
+        "ocr_docx_bytes": None,     # Prebuilt DOCX bytes for the _readable download
+        "ocr_pdf_bytes": None,      # Prebuilt PDF bytes for the _readable download
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -649,32 +829,188 @@ def render_scanned_goodbye():
 
 # -----------------------------------------------------------------------------
 # STEP: running_ocr
-# Placeholder OCR step. Shows a spinner, then transitions to issue_list.
-# In Phase 2, this will call pytesseract or easyocr.
+# Runs Tesseract OCR on every page of the scanned document, then builds both
+# DOCX and PDF versions of the readable output and stores them in session state.
+# Transitions to ocr_format_select on success, or shows an error on failure.
 # -----------------------------------------------------------------------------
 def render_running_ocr():
     """
-    Purpose: Run OCR on the scanned document (Phase 1: placeholder spinner).
-    After OCR, re-analyze the converted text and go to the issue list.
+    Purpose: Run real Tesseract OCR on the uploaded PDF.
+
+    Steps performed here (per CLAUDE.md OCR Process):
+      1. Configure pytesseract with the Tesseract path from sidebar settings.
+      2. Render each page as a 300 DPI image using PyMuPDF.
+      3. Extract text from each image using Tesseract.
+      4. Build DOCX and PDF output files (with disclaimer) and store as bytes
+         in session state so the format selection screen can serve them directly.
+      5. Transition to ocr_format_select, or show an error if Tesseract fails.
+
+    Error handling:
+      If Tesseract raises any exception (binary not found, wrong path, etc.),
+      a clear error message is shown with a "Go back" button. We never crash
+      silently — the user always sees actionable guidance.
     """
     st.title("♿ PDF Assistant")
     st.divider()
+
+    # Read the Tesseract path the user entered in the sidebar.
+    # The sidebar text_input stores this value in session_state["tesseract_path"].
+    tesseract_path = st.session_state.get(
+        "tesseract_path",
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    )
+
+    ocr_error = None  # Will hold an error message string if OCR fails
 
     with st.spinner(
         "Converting your scanned pages to readable text — this may take a moment "
         "for longer documents..."
     ):
-        # Phase 1 placeholder: simulate OCR processing time.
-        # Phase 2 will replace this with pytesseract / easyocr processing.
-        time.sleep(2.5)
+        try:
+            # Step 1-3: Extract text from every page.
+            pages_text = run_ocr(st.session_state.file_bytes, tesseract_path)
 
-    st.success("Conversion complete! Now analyzing the readable text for accessibility issues...")
-    time.sleep(1)
+            # Step 4: Build both output formats now, while the spinner is showing.
+            # Storing bytes in session_state means the format selection screen
+            # can serve downloads instantly without re-running OCR.
+            st.session_state.ocr_pages_text = pages_text
+            st.session_state.ocr_docx_bytes = build_docx(pages_text)
+            st.session_state.ocr_pdf_bytes  = build_pdf(pages_text)
 
-    # After OCR, proceed to show the issue list (using demo issues for Phase 1).
-    st.session_state.issues = DEMO_ISSUES
-    st.session_state.step = "issue_list"
-    st.rerun()
+        except Exception as e:
+            # Capture the error — we'll display it after the spinner exits.
+            # Common causes: Tesseract binary not found, wrong path, or missing
+            # language data files (e.g. tesseract-ocr-eng not installed).
+            ocr_error = str(e)
+
+    if ocr_error:
+        # Show a clear, actionable error — never a raw Python traceback.
+        st.error(
+            "🔴 **Conversion failed — Tesseract OCR could not run.**\n\n"
+            "This usually means Tesseract is not installed, or the path in the "
+            "sidebar settings is incorrect.\n\n"
+            f"**Error details:** {ocr_error}\n\n"
+            "Please check the Tesseract path in the ⚙️ Settings panel on the left, "
+            "then try again. If Tesseract is not installed, you can download it from "
+            "the link in the sidebar help text."
+        )
+        if st.button("← Go back", type="primary"):
+            st.session_state.step = "scanned_doc"
+            st.rerun()
+    else:
+        # Step 5: OCR succeeded — transition to the format selection screen.
+        st.session_state.step = "ocr_format_select"
+        st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# STEP: ocr_format_select
+# Shown after OCR completes successfully. The user picks their output format
+# (DOCX or PDF), downloads the readable file, then decides whether to continue
+# with the accessibility issue workflow or end the session.
+#
+# Per CLAUDE.md OCR Steps 4-7: ask format → save with _readable suffix →
+# show disclaimer note → ask how to continue.
+# -----------------------------------------------------------------------------
+def render_ocr_format_select():
+    """
+    Purpose: Let the user download their OCR-converted file and choose next steps.
+
+    The DOCX and PDF bytes were prebuilt in render_running_ocr() and stored in
+    session_state. This screen serves them via st.download_button — no re-processing.
+
+    File naming per CLAUDE.md: original name + '_readable' before the extension.
+      Example: lecture_notes.pdf → lecture_notes_readable.docx or .pdf
+
+    After downloading, the user chooses:
+      - Yes, let's keep going → proceed to the issue list for accessibility analysis
+      - No, I'm done for now  → end the session (done_reason = "ocr_exit")
+    """
+    st.title("♿ PDF Assistant")
+    st.divider()
+
+    page_count = len(st.session_state.ocr_pages_text)
+    st.success(
+        f"Conversion complete — {page_count} page{'s' if page_count != 1 else ''} "
+        "of readable text extracted successfully."
+    )
+
+    st.markdown(
+        "Your converted file is ready to download. Choose a format below — "
+        "I'll save it with **_readable** added to your original file name."
+    )
+
+    # Build the output file names from the original uploaded name.
+    base_name = st.session_state.file_name.replace(".pdf", "").replace(".PDF", "")
+    docx_name = f"{base_name}_readable.docx"
+    pdf_name  = f"{base_name}_readable.pdf"
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Word processor document (DOCX)**")
+        st.caption(
+            "Opens in Microsoft Word, Google Docs, or any compatible application. "
+            "Best if you need to edit the content further before re-publishing."
+        )
+        # st.download_button renders a button that triggers an immediate file download.
+        # We pass the prebuilt bytes directly — no re-processing on click.
+        st.download_button(
+            label=f"⬇ Download {docx_name}",
+            data=st.session_state.ocr_docx_bytes,
+            file_name=docx_name,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            type="primary",
+            use_container_width=True,
+        )
+
+    with col2:
+        st.markdown("**New PDF document**")
+        st.caption(
+            "A text-based PDF ready to share or upload directly. "
+            "Best if you want a finished file."
+        )
+        st.download_button(
+            label=f"⬇ Download {pdf_name}",
+            data=st.session_state.ocr_pdf_bytes,
+            file_name=pdf_name,
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+    st.divider()
+
+    # Disclaimer acknowledgement — shows the user what was appended to their file.
+    st.caption(f"📄 Note added to your file: "{OCR_DISCLAIMER}"")
+
+    st.divider()
+
+    # Per CLAUDE.md OCR Step 7: after delivering the file, ask how to continue.
+    st.info(
+        "Here are the accessibility issues we found, grouped by severity. "
+        "If you'd like, I can help you work through most of them."
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(
+            "Yes, let's keep going.",
+            type="primary",
+            use_container_width=True,
+            key="ocr_continue",
+        ):
+            # Phase 1: use demo issues. Phase 2: re-analyze the converted document.
+            st.session_state.issues = DEMO_ISSUES
+            st.session_state.step = "issue_list"
+            st.rerun()
+    with col2:
+        if st.button(
+            "No, I'm done for now.",
+            use_container_width=True,
+            key="ocr_done",
+        ):
+            st.session_state.step = "done"
+            st.session_state.done_reason = "ocr_exit"
+            st.rerun()
 
 
 # -----------------------------------------------------------------------------
@@ -1046,6 +1382,12 @@ def render_done():
             "Understood. If you change your mind and would like to convert this file "
             "to readable text, just come back and upload it again."
         )
+    elif reason == "ocr_exit":
+        st.success("Your converted file is ready whenever you need it.")
+        st.markdown(
+            "Whenever you're ready to work through the accessibility issues, "
+            "come back and upload your converted file — I'll pick up right where we left off."
+        )
     elif reason == "clean_exit":
         st.success("Your document is in great shape — no action needed.")
     else:
@@ -1083,6 +1425,7 @@ STEP_HANDLERS = {
     "scanned_doc":          render_scanned_doc,
     "scanned_goodbye":      render_scanned_goodbye,
     "running_ocr":          render_running_ocr,
+    "ocr_format_select":    render_ocr_format_select,
     "no_issues":            render_no_issues,
     "issue_list":           render_issue_list,
     "resolving_issue":      render_resolving_issue,
