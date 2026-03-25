@@ -529,6 +529,126 @@ def _generate_toc_from_font_sizes(doc):
     return toc
 
 
+# =============================================================================
+# HEADING HIERARCHY HELPERS
+# =============================================================================
+# These two functions detect heading structure problems in tagged PDFs.
+# They are called from analyze_pdf() only when is_tagged is True — there is
+# no point checking headings in an untagged PDF since that issue is already
+# flagged as Red and subsumes any heading problems.
+# =============================================================================
+
+def _extract_heading_sequence(file_bytes):
+    """
+    Walk the PDF StructTreeRoot recursively and return a list of heading
+    level integers found in document order.
+
+    PDF heading element types are /H (generic, treated as level 1), and
+    /H1 through /H6. We extract only the numeric level — the text content
+    of each heading requires parsing page content streams and is out of scope.
+
+    Parameters:
+        file_bytes (bytes): Raw PDF bytes to inspect.
+
+    Returns:
+        list[int]: Heading levels in order, e.g. [1, 2, 3, 2, 1, 2].
+                   Empty list if the document has no StructTreeRoot or no
+                   heading elements.
+    """
+    levels = []
+
+    def _walk(node):
+        """Recursively visit every node in the structure tree."""
+        try:
+            if isinstance(node, pikepdf.Dictionary):
+                s_val = node.get("/S")
+                if s_val is not None:
+                    s = str(s_val)
+                    if s == "/H":
+                        levels.append(1)             # generic heading = level 1
+                    elif len(s) == 3 and s[1] == "H" and s[2].isdigit():
+                        levels.append(int(s[2]))     # /H1 … /H6
+                # Descend into children (/K). Children can be:
+                #   - a single Dictionary (another element)
+                #   - an Array of elements and/or MCID integers
+                #   - an integer MCID (skip — no children)
+                kids = node.get("/K")
+                if kids is not None:
+                    _walk(kids)
+            elif isinstance(node, pikepdf.Array):
+                for item in node:
+                    _walk(item)
+            # Integers (MCID references) and other scalars are silently skipped.
+        except Exception:
+            pass
+
+    try:
+        with pikepdf.open(io.BytesIO(file_bytes)) as pdf:
+            if "/StructTreeRoot" not in pdf.Root:
+                return []
+            _walk(pdf.Root["/StructTreeRoot"])
+    except Exception:
+        pass
+
+    return levels
+
+
+def _check_heading_hierarchy(levels):
+    """
+    Inspect a heading level sequence for structural problems.
+
+    Rules checked:
+      - No headings at all — returns "none"
+      - A level jump skips one or more levels going deeper
+        (e.g. H1 → H3 skips H2) — returns "skip"
+      - Going back up (H3 → H1) is always valid — new top-level section.
+
+    Parameters:
+        levels (list[int]): Output of _extract_heading_sequence().
+
+    Returns:
+        str: "none" | "skip" | "ok"
+    """
+    if not levels:
+        return "none"
+    prev = levels[0]
+    for lv in levels[1:]:
+        if lv > prev + 1:    # jump skips at least one level going deeper
+            return "skip"
+        prev = lv
+    return "ok"
+
+
+def _describe_heading_sequence(levels):
+    """
+    Build a short human-readable summary of the heading sequence for display
+    in the fix preview. Marks the first detected skip with an arrow so the
+    faculty member can immediately see where the problem is.
+
+    Parameters:
+        levels (list[int]): Output of _extract_heading_sequence().
+
+    Returns:
+        str: Multi-line markdown string, or a fallback message if levels is empty.
+    """
+    if not levels:
+        return "_No heading elements were found in this document's structure._"
+
+    lines = []
+    prev = levels[0]
+    for lv in levels:
+        indent = "  " * (lv - 1)
+        if lv > prev + 1:
+            lines.append(f"{indent}**H{lv} ← skips H{prev + 1}**")
+        else:
+            lines.append(f"{indent}H{lv}")
+        prev = lv
+    # Truncate to 20 lines to avoid overwhelming the screen
+    if len(lines) > 20:
+        lines = lines[:20] + [f"_… and {len(levels) - 20} more headings_"]
+    return "\n".join(lines)
+
+
 # -----------------------------------------------------------------------------
 # FIX FUNCTIONS
 # Each function takes (working_bytes, fix_data) and returns (new_bytes, message).
@@ -681,14 +801,42 @@ def apply_fix_alt_text(working_bytes, fix_data):
     )
 
 
+def apply_fix_heading_hierarchy(working_bytes, fix_data):
+    """
+    Handle the heading hierarchy issue.
+
+    Rewriting the StructTreeRoot to correct heading levels requires modifying
+    both the structure tree and the page content streams — this cannot be done
+    reliably in-place without a dedicated tagging engine.
+
+    The real fix manifests in the DOCX output: build_docx_from_pdf() uses
+    font-size heuristics to assign correct Heading 1 / Heading 2 / Heading 3
+    styles, producing a document with a valid hierarchy that the faculty member
+    can re-export as a properly tagged PDF from Word or Google Docs.
+
+    Parameters:
+        working_bytes (bytes): Current working copy of the PDF.
+        fix_data (dict): Contains "issue_type" and "heading_levels".
+
+    Returns:
+        (bytes, str): Unchanged PDF bytes and an explanatory message.
+    """
+    return working_bytes, (
+        "Noted. The Word document output will use the correct heading structure "
+        "based on your document's visual layout. Re-exporting from Word will produce "
+        "a properly tagged PDF with a valid heading hierarchy."
+    )
+
+
 # Dispatch table: maps issue ID → fix function.
 # Used by render_resolving_issue() to apply the right fix after faculty confirms.
 FIX_DISPATCH = {
-    "missing_title":    apply_fix_missing_title,
-    "missing_lang":     apply_fix_missing_lang,
-    "missing_bookmarks": apply_fix_bookmarks,
-    "untagged_pdf":     apply_fix_untagged,
-    "missing_alt_text": apply_fix_alt_text,
+    "missing_title":       apply_fix_missing_title,
+    "missing_lang":        apply_fix_missing_lang,
+    "missing_bookmarks":   apply_fix_bookmarks,
+    "untagged_pdf":        apply_fix_untagged,
+    "missing_alt_text":    apply_fix_alt_text,
+    "heading_hierarchy":   apply_fix_heading_hierarchy,
 }
 
 
@@ -866,6 +1014,63 @@ def analyze_pdf(file_bytes):
                 ),
                 "fix_data": {},
             })
+
+        # --- CONTENT CHECK: Heading hierarchy (Yellow) ---
+        # Only meaningful for tagged PDFs — untagged documents are already
+        # flagged Red above, and that issue subsumes any heading problems.
+        # We check two failure modes:
+        #   "none"  — the document is tagged but has no heading elements at all
+        #   "skip"  — heading levels jump (e.g. H1 → H3), breaking navigation
+        if is_tagged:
+            heading_levels = _extract_heading_sequence(file_bytes)
+            hierarchy_status = _check_heading_hierarchy(heading_levels)
+
+            if hierarchy_status == "none":
+                issues.append({
+                    "id": "heading_hierarchy",
+                    "severity": "yellow",
+                    "title": "No headings found in document structure",
+                    "description": (
+                        "This document is tagged for accessibility but contains no heading "
+                        "elements. Screen reader users navigate long documents by jumping "
+                        "between headings — without them, they must listen to the entire "
+                        "document from start to finish to find what they need."
+                    ),
+                    "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+                    "ada": "Title II ADA, 28 CFR Part 35",
+                    "fix_preview": (
+                        "The Word document output will use your document's visual layout "
+                        "to assign proper Heading 1, Heading 2, and Heading 3 styles. "
+                        "Re-exporting from Word will produce a fully navigable PDF."
+                    ),
+                    "fix_data": {"issue_type": "none", "heading_levels": []},
+                })
+
+            elif hierarchy_status == "skip":
+                issues.append({
+                    "id": "heading_hierarchy",
+                    "severity": "yellow",
+                    "title": "Incorrect or missing heading hierarchy",
+                    "description": (
+                        "The heading levels in this document skip one or more levels — "
+                        "for example, jumping from Heading 1 directly to Heading 3 with "
+                        "no Heading 2 in between. Screen reader users rely on heading "
+                        "structure to understand how a document is organized and to jump "
+                        "between sections. A broken hierarchy makes that navigation "
+                        "confusing or misleading."
+                    ),
+                    "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+                    "ada": "Title II ADA, 28 CFR Part 35",
+                    "fix_preview": (
+                        "Here is the heading structure detected in your document. "
+                        "The Word document output will correct the hierarchy based on "
+                        "the visual layout of your document."
+                    ),
+                    "fix_data": {
+                        "issue_type": "skip",
+                        "heading_levels": heading_levels,
+                    },
+                })
 
         # --- CONTENT CHECK: Images without alt text (Red) ---
         # PyMuPDF's page.get_images() returns a list of image references for
@@ -2254,6 +2459,8 @@ def render_resolving_issue():
     # candidate may be wrong, and a blank document has no candidate at all.
     # -------------------------------------------------------------------------
     if issue["id"] == "missing_title":
+        # Show an editable field so faculty can correct the auto-detected
+        # candidate or type a title from scratch.
         fix_data      = issue.get("fix_data", {})
         candidate     = fix_data.get("title_candidate", "")
         st.markdown("**Review and confirm the document title:**")
@@ -2264,6 +2471,22 @@ def render_resolving_issue():
             key="title_input",
             help="Edit this if the detected title isn't quite right, or type one from scratch.",
         )
+
+    elif issue["id"] == "heading_hierarchy":
+        # Show the detected heading sequence with skips flagged inline so the
+        # faculty member can see exactly where the hierarchy breaks down.
+        confirmed_title = None
+        fix_data    = issue.get("fix_data", {})
+        issue_type  = fix_data.get("issue_type", "skip")
+        heading_levels = fix_data.get("heading_levels", [])
+
+        st.markdown("**Here's what we found — and how we'll fix it:**")
+        st.info(issue["fix_preview"])
+
+        if issue_type == "skip" and heading_levels:
+            st.markdown("**Detected heading sequence** (problems marked in bold):")
+            st.markdown(_describe_heading_sequence(heading_levels))
+
     else:
         st.markdown("**Here's what I changed. Does this look right to you?**")
         st.info(issue["fix_preview"])
