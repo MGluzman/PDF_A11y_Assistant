@@ -2246,9 +2246,28 @@ def render_resolving_issue():
 
     st.divider()
 
-    # Show the proposed fix (Phase 1: placeholder description from issue data)
-    st.markdown("**Here's what I changed. Does this look right to you?**")
-    st.info(issue["fix_preview"])
+    # -------------------------------------------------------------------------
+    # Issue-specific fix UI
+    #
+    # Most issues show a static description of what will be applied.
+    # The missing_title issue requires an editable field — the auto-detected
+    # candidate may be wrong, and a blank document has no candidate at all.
+    # -------------------------------------------------------------------------
+    if issue["id"] == "missing_title":
+        fix_data      = issue.get("fix_data", {})
+        candidate     = fix_data.get("title_candidate", "")
+        st.markdown("**Review and confirm the document title:**")
+        st.markdown(issue["fix_preview"])
+        confirmed_title = st.text_input(
+            "Document title:",
+            value=candidate,
+            key="title_input",
+            help="Edit this if the detected title isn't quite right, or type one from scratch.",
+        )
+    else:
+        st.markdown("**Here's what I changed. Does this look right to you?**")
+        st.info(issue["fix_preview"])
+        confirmed_title = None  # not used for other issue types
 
     # Faculty confirmation — exactly two choices per CLAUDE.md
     col1, col2 = st.columns(2)
@@ -2259,35 +2278,49 @@ def render_resolving_issue():
             use_container_width=True,
             key="confirm_yes",
         ):
-            # Apply the real fix to the working copy of the PDF.
-            # FIX_DISPATCH maps issue ID → fix function. If no fix function
-            # exists for this issue ID, the working copy is left unchanged.
-            fix_fn = FIX_DISPATCH.get(issue["id"])
-            if fix_fn and st.session_state.working_pdf_bytes:
-                new_bytes, _ = fix_fn(
-                    st.session_state.working_pdf_bytes,
-                    issue.get("fix_data", {}),
-                )
-                st.session_state.working_pdf_bytes = new_bytes
+            # For missing_title, validate and store the user's edited value
+            # before calling the fix function. Guard against an empty field.
+            proceed = True
+            if issue["id"] == "missing_title":
+                value = (confirmed_title or "").strip()
+                if not value:
+                    st.warning("Please enter a title before saving.")
+                    proceed = False
+                else:
+                    # Write the confirmed title into fix_data so
+                    # apply_fix_missing_title() uses it over the raw candidate.
+                    issue["fix_data"]["confirmed_title"] = value
 
-            # Mark this issue as resolved
-            st.session_state.resolved_ids.append(issue["id"])
-            st.session_state.resolved_count += 1
-            st.session_state.current_issue_id = None
-            st.session_state.proposed_fix = None
+            if proceed:
+                # Apply the real fix to the working copy of the PDF.
+                # FIX_DISPATCH maps issue ID → fix function. If no fix function
+                # exists for this issue ID, the working copy is left unchanged.
+                fix_fn = FIX_DISPATCH.get(issue["id"])
+                if fix_fn and st.session_state.working_pdf_bytes:
+                    new_bytes, _ = fix_fn(
+                        st.session_state.working_pdf_bytes,
+                        issue.get("fix_data", {}),
+                    )
+                    st.session_state.working_pdf_bytes = new_bytes
 
-            # Check if we've hit a multiple of 3 — offer re-analysis
-            # Per CLAUDE.md: "After every three issues have been resolved, offer a re-analysis"
-            if (
-                st.session_state.resolved_count % 3 == 0
-                and not st.session_state.reanalysis_done
-            ):
-                st.session_state.step = "re_analysis"
-            else:
-                st.session_state.reanalysis_done = False
-                st.session_state.step = "continue_or_stop"
+                # Mark this issue as resolved
+                st.session_state.resolved_ids.append(issue["id"])
+                st.session_state.resolved_count += 1
+                st.session_state.current_issue_id = None
+                st.session_state.proposed_fix = None
 
-            st.rerun()
+                # Check if we've hit a multiple of 3 — offer re-analysis
+                # Per CLAUDE.md: "After every three issues have been resolved, offer a re-analysis"
+                if (
+                    st.session_state.resolved_count % 3 == 0
+                    and not st.session_state.reanalysis_done
+                ):
+                    st.session_state.step = "re_analysis"
+                else:
+                    st.session_state.reanalysis_done = False
+                    st.session_state.step = "continue_or_stop"
+
+                st.rerun()
 
     with col2:
         if st.button(
