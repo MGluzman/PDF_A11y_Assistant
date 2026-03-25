@@ -284,6 +284,39 @@ Defined Red Light issues:
   receive no headings, no reading order, no landmarks — the content is effectively
   inaccessible to them. (WCAG 2.1 SC 1.3.1; Title II 28 CFR Part 35)
 
+  When the user selects this issue from the issue list, do NOT go directly to the
+  fix screen. First ask the Source File Question (see below).
+
+  ### Source File Question
+  Before attempting to fix an untagged PDF, ask:
+
+  > "Before we dig in — do you still have the original Word, Google Docs,
+  > PowerPoint, or Google Slides file you used to create this PDF?"
+
+  Present exactly two choices:
+  1. **Yes, I have the original file.** — goes to the CUNY Resources screen (see below)
+  2. **No, I only have the PDF.** — proceeds to the standard fix screen for untagged PDFs
+
+  ### CUNY Resources Screen
+  When the user has the original source file, display:
+
+  > "The best fix for an untagged PDF is to update the original source file
+  > directly — and we're building a tool to help you do exactly that. While
+  > that's in progress, here are CUNY's accessibility guides to walk you
+  > through the process:"
+
+  Display the following resources as clearly labeled links:
+  - **CUNY Accessibility Toolkit** — https://guides.cuny.edu/accessibility
+  - **Making Word Documents Accessible** — https://guides.cuny.edu/accessibility/microsoft_word
+  - **Making PowerPoint Presentations Accessible** — https://guides.cuny.edu/accessibility/powerpoint
+
+  Then present exactly two choices:
+  1. **Review these resources and update my original file.** — ends the untagged
+     PDF issue, marks it as acknowledged, returns to the issue list so the user
+     can continue working on other issues (alt text, language tag, etc.)
+  2. **Keep going with this PDF.** — proceeds to the standard fix screen for
+     untagged PDFs, as if the user had answered "No" to the source file question
+
 - **Severe readability barrier** — Any sustained block of text (body text, pull quotes,
   captions, callout boxes, sidebars, footnotes) that is significantly difficult to read
   due to any of the following, when the affected text totals more than 25% of the

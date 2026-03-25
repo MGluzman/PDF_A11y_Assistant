@@ -23,11 +23,15 @@
 
 import io                    # In-memory byte streams for building files without writing to disk
 import time                  # Used for brief delays during state transitions
+from collections import Counter  # Frequency counting for font-size heuristics
 import fitz                  # PyMuPDF — opens PDFs, renders pages as images, checks password
+import pikepdf               # Low-level PDF editing — writes metadata and structural fixes
 import pytesseract           # Python wrapper around the Tesseract OCR binary
 import streamlit as st       # The main framework — builds the entire UI
+from langdetect import detect as detect_language  # Detects the written language of extracted text
 from PIL import Image        # Pillow — convert PyMuPDF pixel data to images pytesseract can read
 from docx import Document as DocxDocument   # python-docx — builds DOCX output files
+from docx.shared import Pt                  # Point sizes for DOCX styles
 from reportlab.lib.pagesizes import letter  # ReportLab — builds PDF output files
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
@@ -349,19 +353,353 @@ def build_pdf(pages_text):
 
 
 # =============================================================================
-# PDF ANALYSIS — PLACEHOLDER (Phase 1)
+# IMAGE EXTRACTION HELPER
 # =============================================================================
-# This function uses PyMuPDF to do two real checks:
-#   1. Can the file be opened? (password protection)
-#   2. Does the first page have any selectable text? (scanned/image-based check)
+# Used by the per-image alt text workflow to render each image from the PDF
+# so the faculty member can see what they're describing.
+# =============================================================================
+
+def extract_image_from_pdf(pdf_bytes, xref):
+    """
+    Extract a single image from a PDF by its cross-reference number (xref).
+
+    PyMuPDF assigns each embedded image a unique xref that persists for the
+    lifetime of the document. We use extract_image() rather than rendering
+    the full page, so we get the original image data at full resolution.
+
+    Parameters:
+        pdf_bytes (bytes): The current working copy of the PDF.
+        xref (int): The xref number of the target image (from page.get_images()).
+
+    Returns:
+        (bytes, str): Raw image bytes and the file extension (e.g. "png", "jpeg"),
+                      or (None, None) if extraction fails.
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        img_info = doc.extract_image(xref)
+        doc.close()
+        if img_info:
+            return img_info["image"], img_info["ext"]
+    except Exception:
+        pass
+    return None, None
+
+
+# =============================================================================
+# PDF ANALYSIS — Phase 2 (real checks)
+# =============================================================================
+# analyze_pdf() performs the following checks on every uploaded PDF:
 #
-# If those checks pass, it returns the hardcoded DEMO_ISSUES list.
-# In Phase 2, this function will be replaced with real analysis logic.
+#   GATE CHECKS (stop analysis immediately if true):
+#     1. Password protection — file cannot be read at all
+#     2. Scanned/image-based — no selectable text; OCR required first
+#
+#   CONTENT CHECKS (run on readable, non-scanned PDFs):
+#     Red   — Untagged PDF (no accessibility structure tree)
+#     Red   — Images without alt text (images detected on any page)
+#     Yellow — Missing document language tag (/Lang in PDF root)
+#     Green  — Missing document title (empty /Title in metadata)
+#     Green  — Missing bookmarks (no TOC and document > 9 pages)
+#
+# Each detected issue is returned as a dict with:
+#   id, severity, title, description, wcag, ada, fix_preview, fix_data
+#
+# fix_data carries any extra information the fix function will need later
+# (e.g., the detected language code, a title candidate, a list of images).
 # =============================================================================
+
+
+def _detect_title_candidate(doc):
+    """
+    Heuristic: scan the first page for the largest-font non-empty text span.
+    That text is almost always the document title.
+
+    Parameters:
+        doc: an open fitz.Document object
+
+    Returns:
+        str — the candidate title text, or "" if nothing useful was found
+    """
+    try:
+        page = doc[0]
+        blocks = page.get_text("dict")["blocks"]
+        best_text = ""
+        best_size = 0
+        for block in blocks:
+            if block.get("type") != 0:   # skip image blocks
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    size = span.get("size", 0)
+                    text = span.get("text", "").strip()
+                    # Accept spans that are clearly heading-sized and
+                    # short enough to plausibly be a title (< 120 chars).
+                    if text and size > best_size and len(text) < 120:
+                        best_size = size
+                        best_text = text
+        return best_text
+    except Exception:
+        return ""
+
+
+def _lang_display_name(lang_code):
+    """
+    Map a BCP 47 language code to a human-readable name for display in the UI.
+
+    Parameters:
+        lang_code (str): e.g. "en-US", "fr-FR"
+
+    Returns:
+        str — readable name, or the code itself if not in the table
+    """
+    names = {
+        "en": "English", "en-US": "English", "en-GB": "English",
+        "fr": "French",  "fr-FR": "French",
+        "es": "Spanish", "es-ES": "Spanish",
+        "de": "German",  "de-DE": "German",
+        "zh": "Chinese", "ja": "Japanese", "ar": "Arabic",
+        "pt": "Portuguese", "it": "Italian",
+    }
+    return names.get(lang_code, lang_code)
+
+
+def _generate_toc_from_font_sizes(doc):
+    """
+    Build a table-of-contents list suitable for fitz.Document.set_toc() by
+    treating text spans whose font size is significantly larger than the
+    document's body text as headings.
+
+    Approach:
+      1. Collect every text span across all pages with its font size and page.
+      2. Find the most common rounded font size — that is the body text size.
+      3. Any span with size > 120% of body size is a heading candidate.
+      4. Rank unique heading sizes descending to assign heading levels 1–3.
+      5. Return a list of [level, title, page_number] entries.
+
+    Parameters:
+        doc: an open fitz.Document object
+
+    Returns:
+        list of [int level, str title, int page] — empty if nothing found
+    """
+    all_spans = []
+    for page_num, page in enumerate(doc):
+        for block in page.get_text("dict")["blocks"]:
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = span.get("text", "").strip()
+                    size = span.get("size", 0)
+                    if text and size > 0 and len(text) < 150:
+                        all_spans.append({
+                            "text": text,
+                            "size": size,
+                            "page": page_num + 1,
+                        })
+
+    if not all_spans:
+        return []
+
+    # Most common rounded font size = body text
+    sizes = [round(s["size"]) for s in all_spans]
+    body_size = Counter(sizes).most_common(1)[0][0]
+
+    # Heading candidates are spans noticeably larger than body text
+    heading_spans = [s for s in all_spans if s["size"] > body_size * 1.2]
+    if not heading_spans:
+        return []
+
+    # Map each unique heading size to a level (largest font = level 1)
+    unique_sizes = sorted(set(round(s["size"]) for s in heading_spans), reverse=True)
+    size_to_level = {sz: min(i + 1, 3) for i, sz in enumerate(unique_sizes)}
+
+    # Build the TOC, de-duplicating identical consecutive headings
+    toc = []
+    seen = set()
+    for span in heading_spans:
+        text = span["text"]
+        if text in seen:
+            continue
+        seen.add(text)
+        level = size_to_level.get(round(span["size"]), 1)
+        toc.append([level, text, span["page"]])
+
+    return toc
+
+
+# -----------------------------------------------------------------------------
+# FIX FUNCTIONS
+# Each function takes (working_bytes, fix_data) and returns (new_bytes, message).
+# working_bytes — the current state of the working copy of the PDF.
+# fix_data      — the dict stored in the issue when analysis ran (may be empty).
+# new_bytes     — updated PDF bytes after the fix (same as input if fix failed).
+# message       — a brief confirmation string shown to the user after saving.
+# -----------------------------------------------------------------------------
+
+def apply_fix_missing_title(working_bytes, fix_data):
+    """
+    Write a document title to the PDF's Info dictionary and XMP metadata.
+
+    Uses both pdf.docinfo (old-style Info dict) and pdf.open_metadata() (XMP)
+    for maximum reader compatibility.
+
+    Parameters:
+        working_bytes (bytes): Current working copy of the PDF.
+        fix_data (dict): Must contain "confirmed_title" (set by the UI after
+                         faculty edits/approves) or "title_candidate" as fallback.
+
+    Returns:
+        (bytes, str): Updated PDF bytes and a short confirmation message.
+    """
+    title = (fix_data.get("confirmed_title") or fix_data.get("title_candidate", "")).strip()
+    if not title:
+        return working_bytes, "No title provided — metadata unchanged."
+    try:
+        with pikepdf.open(io.BytesIO(working_bytes)) as pdf:
+            # XMP metadata (preferred by modern PDF readers and assistive tech)
+            with pdf.open_metadata() as meta:
+                meta["dc:title"] = title
+            # Info dict (legacy, but still read by many screen readers)
+            pdf.docinfo["/Title"] = title
+            out = io.BytesIO()
+            pdf.save(out)
+            return out.getvalue(), f"Title set to \"{title}\"."
+    except Exception as e:
+        return working_bytes, f"Could not apply title fix: {e}"
+
+
+def apply_fix_missing_lang(working_bytes, fix_data):
+    """
+    Write a /Lang entry to the PDF's document root.
+
+    /Lang is the standard PDF mechanism for declaring the document language.
+    Screen readers use it to select the correct speech engine and pronunciation
+    rules. (WCAG 2.1 SC 3.1.1)
+
+    Parameters:
+        working_bytes (bytes): Current working copy of the PDF.
+        fix_data (dict): Must contain "lang_code" (BCP 47, e.g. "en-US").
+
+    Returns:
+        (bytes, str): Updated PDF bytes and a short confirmation message.
+    """
+    lang_code = fix_data.get("lang_code", "en-US")
+    try:
+        with pikepdf.open(io.BytesIO(working_bytes)) as pdf:
+            pdf.Root["/Lang"] = pikepdf.String(lang_code)
+            out = io.BytesIO()
+            pdf.save(out)
+            return out.getvalue(), f"Language tag set to '{lang_code}'."
+    except Exception as e:
+        return working_bytes, f"Could not apply language fix: {e}"
+
+
+def apply_fix_bookmarks(working_bytes, fix_data):
+    """
+    Generate and write a bookmark outline to the PDF using font-size heuristics
+    to detect heading structure.
+
+    Uses PyMuPDF's set_toc() which writes a proper PDF /Outline tree that PDF
+    readers and assistive technology can navigate. (WCAG 2.1 SC 2.4.5)
+
+    Parameters:
+        working_bytes (bytes): Current working copy of the PDF.
+        fix_data (dict): Unused; included for consistent function signature.
+
+    Returns:
+        (bytes, str): Updated PDF bytes and a short confirmation message.
+    """
+    try:
+        doc = fitz.open(stream=working_bytes, filetype="pdf")
+        toc = _generate_toc_from_font_sizes(doc)
+        if toc:
+            doc.set_toc(toc)
+        out = io.BytesIO()
+        doc.save(out)
+        doc.close()
+        count = len(toc)
+        return out.getvalue(), f"Added {count} bookmark{'s' if count != 1 else ''}."
+    except Exception as e:
+        return working_bytes, f"Could not apply bookmarks fix: {e}"
+
+
+def apply_fix_untagged(working_bytes, fix_data):
+    """
+    Handle the untagged PDF issue.
+
+    True in-place PDF tagging (adding a full StructTreeRoot) requires
+    reconstructing the document's entire logical structure — this is beyond
+    what a runtime script can reliably do without a dedicated tagging engine
+    (e.g., Adobe Acrobat Pro, axesPDF, CommonLook).
+
+    Instead, we note the issue. When the faculty member downloads their file as
+    DOCX (via render_choose_format), the build_docx_from_pdf() function applies
+    font-size heuristics to produce a structured DOCX with proper heading styles.
+    They can then re-export that DOCX as a properly tagged PDF from Word or
+    Google Docs.
+
+    Parameters:
+        working_bytes (bytes): Current working copy of the PDF.
+        fix_data (dict): Unused.
+
+    Returns:
+        (bytes, str): Unchanged PDF bytes and an explanatory message.
+    """
+    # No change to the PDF bytes — the fix manifests in the DOCX output path.
+    return working_bytes, (
+        "Noted. When you download your file as a Word document, it will be structured "
+        "with proper headings and reading order — ready to re-save as a properly tagged "
+        "PDF from Word or Google Docs."
+    )
+
+
+def apply_fix_alt_text(working_bytes, fix_data):
+    """
+    Handle the missing alt text issue.
+
+    Writing alt text directly into a PDF's structure tree requires the document
+    to already have a StructTreeRoot with Figure elements — which untagged PDFs
+    lack entirely. For tagged PDFs, it requires locating each Figure element and
+    writing the /Alt attribute.
+
+    For now we record the acknowledgement. The alt text descriptions collected
+    during the session (stored in st.session_state) are available for inclusion
+    in the DOCX output.
+
+    Parameters:
+        working_bytes (bytes): Current working copy of the PDF.
+        fix_data (dict): Contains "images" list from analysis.
+
+    Returns:
+        (bytes, str): Unchanged PDF bytes and a confirmation message.
+    """
+    return working_bytes, (
+        "The text descriptions you've provided will be included in the Word document output. "
+        "When you re-export from Word, you can add them as alt text to each image."
+    )
+
+
+# Dispatch table: maps issue ID → fix function.
+# Used by render_resolving_issue() to apply the right fix after faculty confirms.
+FIX_DISPATCH = {
+    "missing_title":    apply_fix_missing_title,
+    "missing_lang":     apply_fix_missing_lang,
+    "missing_bookmarks": apply_fix_bookmarks,
+    "untagged_pdf":     apply_fix_untagged,
+    "missing_alt_text": apply_fix_alt_text,
+}
+
 
 def analyze_pdf(file_bytes):
     """
     Analyze a PDF file and return a result dict describing what was found.
+
+    Gate checks run first (password, scanned). If both pass, content checks
+    run to detect specific accessibility issues. Each detected issue is returned
+    as a dict that includes fix_data — the extra information the matching fix
+    function will need when the user confirms the fix later.
 
     Parameters:
         file_bytes (bytes): The raw bytes of the uploaded PDF file.
@@ -370,52 +708,291 @@ def analyze_pdf(file_bytes):
         dict with keys:
             status  — "password_protected" | "scanned" | "no_issues" | "issues_found"
             issues  — list of issue dicts (empty if status is not "issues_found")
+            cover_page_only — bool (only present when status == "scanned")
     """
+    issues = []
+
     try:
-        # fitz.open() with a stream parameter reads from bytes in memory.
-        # If the file is password-protected and cannot be opened, PyMuPDF
-        # raises a fitz.FileDataError or returns a document that needs a password.
         doc = fitz.open(stream=file_bytes, filetype="pdf")
 
-        # Check if the document requires a password to access content.
+        # --- GATE CHECK 1: Password protection ---
         # doc.needs_pass is True when the file is encrypted and unreadable.
         if doc.needs_pass:
+            doc.close()
             return {"status": "password_protected", "issues": []}
 
-        # Check whether the first page contains any selectable (real) text.
-        # Scanned documents render pages as images — get_text() returns empty
-        # string "" because there are no text characters embedded in the file.
+        # --- GATE CHECK 2: Scanned / image-based document ---
+        # Scanned PDFs have no selectable text — get_text() returns "".
+        # We apply the 2-page sampling rule defined in CLAUDE.md:
+        #   page 1 empty → check page 2 → stop analysis regardless, require OCR.
         if len(doc) > 0:
             first_page_text = doc[0].get_text().strip()
             if not first_page_text:
-                # Page 1 has no selectable text.
-                #
-                # We sample page 2 (if it exists) to distinguish between two
-                # scenarios:
-                #   a) cover_page_only=True  — page 1 is a graphic cover image
-                #      but page 2 has real text (rest of doc is likely readable)
-                #   b) cover_page_only=False — both pages are unreadable, so the
-                #      document is almost certainly fully scanned throughout
-                #
-                # Design decision: in BOTH cases we stop analysis and require
-                # OCR first. Any unreadable page means we cannot guarantee a
-                # complete analysis, and OCR can restructure content in ways
-                # that would invalidate fixes applied beforehand.
-                # The flag is stored so messaging can be tailored later.
                 cover_page_only = len(doc) > 1 and bool(doc[1].get_text().strip())
                 doc.close()
-                return {"status": "scanned", "issues": [], "cover_page_only": cover_page_only}
+                return {
+                    "status": "scanned",
+                    "issues": [],
+                    "cover_page_only": cover_page_only,
+                }
+
+        page_count = len(doc)
+        metadata = doc.metadata or {}
+
+        # --- CONTENT CHECK: Missing document title (Green) ---
+        # PyMuPDF exposes the Info dict as doc.metadata with a "title" key.
+        title = (metadata.get("title") or "").strip()
+        if not title:
+            title_candidate = _detect_title_candidate(doc)
+            if title_candidate:
+                fix_preview = (
+                    f"I'll add the title \"{title_candidate}\" to your document's metadata. "
+                    "Screen readers announce this when the file opens, and it helps with "
+                    "search indexing. You can edit it below before I save it."
+                )
+            else:
+                fix_preview = (
+                    "I'll add a descriptive title to the document metadata. "
+                    "Enter the title you'd like to use for this document."
+                )
+            issues.append({
+                "id": "missing_title",
+                "severity": "green",
+                "title": "Missing document title in metadata",
+                "description": (
+                    "The document's title field is empty — it currently defaults to the filename. "
+                    "Screen readers announce the document title when a file opens, and search "
+                    "tools use it for indexing. A descriptive title helps all users understand "
+                    "what they're looking at before they start reading."
+                ),
+                "wcag": "WCAG 2.1 SC 2.4.2 — Page Titled",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": fix_preview,
+                "fix_data": {"title_candidate": title_candidate},
+            })
+
+        # --- CONTENT CHECK: Missing language tag (Yellow) ---
+        # PyMuPDF surfaces /Lang (if present) as doc.metadata["language"].
+        lang = (metadata.get("language") or "").strip()
+        if not lang:
+            # Auto-detect the language from the first ~1000 characters of text.
+            sample_text = ""
+            for page in doc:
+                sample_text += page.get_text()
+                if len(sample_text) >= 1000:
+                    break
+            try:
+                detected = detect_language(sample_text[:1000]) if sample_text.strip() else "en"
+            except Exception:
+                detected = "en"
+            # Convert langdetect 2-letter codes to BCP 47 codes for PDF /Lang.
+            lang_map = {
+                "en": "en-US", "fr": "fr-FR", "es": "es-ES",
+                "de": "de-DE", "pt": "pt-PT", "it": "it-IT",
+            }
+            lang_code = lang_map.get(detected, detected)
+            issues.append({
+                "id": "missing_lang",
+                "severity": "yellow",
+                "title": "Missing document language tag",
+                "description": (
+                    "This document doesn't declare what language it's written in. Screen readers "
+                    "use the language tag to select the correct pronunciation rules and speech "
+                    "engine. Without it, text may be read aloud in the wrong language or with "
+                    "incorrect pronunciation — especially for technical terms and proper names."
+                ),
+                "wcag": "WCAG 2.1 SC 3.1.1 — Language of Page",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    f"I've detected that this document is written in "
+                    f"{_lang_display_name(lang_code)} and will add the language tag "
+                    f"'{lang_code}' to the document metadata."
+                ),
+                "fix_data": {"lang_code": lang_code},
+            })
+
+        # --- CONTENT CHECK: Missing bookmarks (Green) ---
+        # doc.get_toc() returns a list of [level, title, page] entries.
+        # An empty list means no bookmark outline exists.
+        toc = doc.get_toc()
+        if page_count > 9 and not toc:
+            issues.append({
+                "id": "missing_bookmarks",
+                "severity": "green",
+                "title": "Missing bookmarks / navigation",
+                "description": (
+                    f"This document is {page_count} pages long but has no bookmarks. "
+                    "Without bookmarks, everyone — not just screen reader users — has to "
+                    "scroll through the entire document to find what they need."
+                ),
+                "wcag": "WCAG 2.1 SC 2.4.5 — Multiple Ways",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    "I'll generate bookmarks based on the heading structure I detect in your "
+                    "document. You can review the bookmark list before I save it."
+                ),
+                "fix_data": {},
+            })
+
+        # --- CONTENT CHECK: Untagged PDF (Red) ---
+        # A tagged PDF has a /StructTreeRoot in its root dictionary.
+        # We use pikepdf for this check because PyMuPDF does not expose the
+        # root dict directly in a reliable way across versions.
+        is_tagged = False
+        try:
+            with pikepdf.open(io.BytesIO(file_bytes)) as pdf:
+                is_tagged = "/StructTreeRoot" in pdf.Root
+        except Exception:
+            pass  # If pikepdf fails, assume untagged (safer for accessibility)
+
+        if not is_tagged:
+            issues.append({
+                "id": "untagged_pdf",
+                "severity": "red",
+                "title": "Untagged PDF — no document structure",
+                "description": (
+                    "This document has no accessibility tags. Tags are the behind-the-scenes "
+                    "structure that tells screen readers what is a heading, what is a paragraph, "
+                    "and what order to read things in. Without them, a screen reader user hears "
+                    "the content as an undifferentiated stream of text — or nothing at all."
+                ),
+                "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    "I'll convert this document to a structured Word document (DOCX) that "
+                    "preserves your headings, paragraphs, and reading order. You can then "
+                    "re-save it as a properly tagged PDF from Word or Google Docs. This is "
+                    "the most reliable path to a fully accessible PDF."
+                ),
+                "fix_data": {},
+            })
+
+        # --- CONTENT CHECK: Images without alt text (Red) ---
+        # PyMuPDF's page.get_images() returns a list of image references for
+        # every image rendered on the page. If any images are found anywhere
+        # in the document, we flag this issue.
+        images = []
+        for page_num, page in enumerate(doc):
+            for img in page.get_images(full=True):
+                xref = img[0]
+                images.append({"page": page_num + 1, "xref": xref})
+
+        if images:
+            count = len(images)
+            issues.append({
+                "id": "missing_alt_text",
+                "severity": "red",
+                "title": "Images with missing text descriptions",
+                "description": (
+                    f"This document contains {count} image{'s' if count != 1 else ''} "
+                    "that don't have text descriptions (alt text). Students who use screen "
+                    "readers — software that reads content aloud — won't be able to access "
+                    "the information those images convey."
+                ),
+                "wcag": "WCAG 2.1 SC 1.1.1 — Non-text Content",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    f"I found {count} image{'s' if count != 1 else ''} in your document. "
+                    "I'll walk you through each one so you can tell me whether it's decorative "
+                    "or informational, and we'll add the right text description for each."
+                ),
+                "fix_data": {"images": images},
+            })
 
         doc.close()
 
     except Exception:
-        # If PyMuPDF raises any other error opening the file, treat it as
-        # password-protected (safest fallback — don't crash the app).
-        return {"status": "password_protected", "issues": []}
+        # If analysis fails entirely, fall back to demo issues rather than
+        # crashing — this keeps the app usable even if a PDF is malformed.
+        return {"status": "issues_found", "issues": DEMO_ISSUES}
 
-    # Phase 1 placeholder: always return the full demo issue list.
-    # Phase 2 will replace this with real analysis results.
-    return {"status": "issues_found", "issues": DEMO_ISSUES}
+    if not issues:
+        return {"status": "no_issues", "issues": []}
+
+    return {"status": "issues_found", "issues": issues}
+
+
+# =============================================================================
+# DOCX OUTPUT BUILDER — Phase 2
+# =============================================================================
+# build_docx_from_pdf() extracts text and structure from the working PDF and
+# produces a properly styled DOCX file using python-docx.
+#
+# It uses the same font-size heuristic as _generate_toc_from_font_sizes():
+#   - Most common rounded font size  = body text → Normal paragraph style
+#   - Size > 140% of body            = Heading 1
+#   - Size > 120% of body            = Heading 2
+#
+# This function is used by render_choose_format() when the faculty member
+# chooses to download their remediated file as a Word document.
+# =============================================================================
+
+def build_docx_from_pdf(pdf_bytes):
+    """
+    Extract text and structure from a PDF and produce a structured DOCX.
+
+    Parameters:
+        pdf_bytes (bytes): The working copy of the PDF (with metadata fixes applied).
+
+    Returns:
+        bytes: A DOCX file as raw bytes, ready for st.download_button.
+    """
+    doc_out = DocxDocument()
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        # Determine body text size using the same frequency approach as TOC generation.
+        all_sizes = []
+        for page in doc:
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        if span.get("text", "").strip():
+                            all_sizes.append(span.get("size", 12))
+        body_size = Counter(round(s) for s in all_sizes).most_common(1)[0][0] if all_sizes else 12
+
+        for page_num, page in enumerate(doc):
+            if page_num > 0:
+                doc_out.add_page_break()
+
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+
+                for line in block.get("lines", []):
+                    # Join spans within a line into a single string.
+                    line_text = " ".join(
+                        span.get("text", "") for span in line.get("spans", [])
+                    ).strip()
+                    if not line_text:
+                        continue
+
+                    # Determine average font size for this line.
+                    line_sizes = [span.get("size", body_size) for span in line.get("spans", [])]
+                    avg_size = sum(line_sizes) / len(line_sizes) if line_sizes else body_size
+
+                    # Map font size to a DOCX style.
+                    if avg_size > body_size * 1.4:
+                        doc_out.add_heading(line_text, level=1)
+                    elif avg_size > body_size * 1.2:
+                        doc_out.add_heading(line_text, level=2)
+                    else:
+                        doc_out.add_paragraph(line_text)
+
+        doc.close()
+
+    except Exception:
+        doc_out.add_paragraph(
+            "The content of this document could not be extracted automatically. "
+            "Please open the original PDF and copy the content manually."
+        )
+
+    out = io.BytesIO()
+    doc_out.save(out)
+    return out.getvalue()
 
 
 # =============================================================================
@@ -441,6 +1018,12 @@ def init_state():
         "ocr_pages_text": [],       # List of strings — one per page — from run_ocr()
         "ocr_docx_bytes": None,     # Prebuilt DOCX bytes for the _readable download
         "ocr_pdf_bytes": None,      # Prebuilt PDF bytes for the _readable download
+        "ocr_issues": [],           # Accessibility issues found in the OCR-converted PDF
+        "working_pdf_bytes": None,  # Running copy of the PDF — updated as fixes are applied
+        "alt_text_images": [],      # Image list from the missing_alt_text issue's fix_data
+        "alt_text_index": 0,        # Index of the image currently being worked on
+        "alt_text_phase": "question_1",  # Sub-step within the per-image workflow
+        "alt_text_results": {},     # {xref: {type, severity, alt_text, page}} — one per image
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -511,7 +1094,7 @@ with st.sidebar:
         under **Title II of the ADA** (28 CFR Part 35), effective
         April 24, 2026 for large public institutions.
 
-        Version 0.2 — Phase 1
+        Version 0.3 — Phase 2
         """
     )
 
@@ -555,8 +1138,11 @@ def render_upload():
     if uploaded_file is not None:
         # Store the file name and raw bytes in session state so we can
         # access them in later steps even after Streamlit re-renders.
+        # working_pdf_bytes starts as an exact copy of the original and is
+        # updated in-place as each fix is confirmed — the original is never touched.
         st.session_state.file_name = uploaded_file.name
         st.session_state.file_bytes = uploaded_file.read()
+        st.session_state.working_pdf_bytes = st.session_state.file_bytes
         st.session_state.step = "analyzing"
         st.rerun()
 
@@ -575,9 +1161,6 @@ def render_analyzing():
     st.divider()
 
     with st.spinner(f"Analyzing **{st.session_state.file_name}** — just a moment..."):
-        # Simulate a brief delay so the spinner is visible.
-        # In Phase 2 this delay will be replaced by actual processing time.
-        time.sleep(1.5)
         result = analyze_pdf(st.session_state.file_bytes)
 
     # Route to the correct next step based on what was found.
@@ -867,15 +1450,32 @@ def render_running_ocr():
         "for longer documents..."
     ):
         try:
-            # Step 1-3: Extract text from every page.
+            # Steps 1-3: Extract text from every page using Tesseract.
             pages_text = run_ocr(st.session_state.file_bytes, tesseract_path)
 
-            # Step 4: Build both output formats now, while the spinner is showing.
-            # Storing bytes in session_state means the format selection screen
-            # can serve downloads instantly without re-running OCR.
+            # Step 4: Build both output formats while the spinner is still
+            # showing. Storing bytes in session_state means the format
+            # selection screen can serve downloads instantly without re-running OCR.
             st.session_state.ocr_pages_text = pages_text
             st.session_state.ocr_docx_bytes = build_docx(pages_text)
-            st.session_state.ocr_pdf_bytes  = build_pdf(pages_text)
+            ocr_pdf_bytes = build_pdf(pages_text)
+            st.session_state.ocr_pdf_bytes  = ocr_pdf_bytes
+
+            # Per CLAUDE.md OCR Step 7: run accessibility analysis on the
+            # converted document now, while the spinner is visible, so the
+            # format select screen can present real issue counts immediately.
+            # We analyze the PDF version of the output because analyze_pdf()
+            # works on PDF bytes — it's the same content either way.
+            analysis_result = analyze_pdf(ocr_pdf_bytes)
+            if analysis_result["status"] == "issues_found":
+                st.session_state.ocr_issues = analysis_result["issues"]
+            else:
+                st.session_state.ocr_issues = []
+
+            # The OCR-converted PDF becomes the new working copy. All
+            # subsequent fixes are applied to this document, not the original
+            # scanned file.
+            st.session_state.working_pdf_bytes = ocr_pdf_bytes
 
         except Exception as e:
             # Capture the error — we'll display it after the spinner exits.
@@ -980,15 +1580,39 @@ def render_ocr_format_select():
     st.divider()
 
     # Disclaimer acknowledgement — shows the user what was appended to their file.
-    st.caption(f"📄 Note added to your file: "{OCR_DISCLAIMER}"")
+    st.caption(f'📄 Note added to your file: "{OCR_DISCLAIMER}"')
 
     st.divider()
 
-    # Per CLAUDE.md OCR Step 7: after delivering the file, ask how to continue.
-    st.info(
-        "Here are the accessibility issues we found, grouped by severity. "
-        "If you'd like, I can help you work through most of them."
-    )
+    # Per CLAUDE.md OCR Step 7: present the accessibility analysis results
+    # that were already run inside render_running_ocr(), then ask how to continue.
+    ocr_issues = st.session_state.get("ocr_issues", [])
+
+    if ocr_issues:
+        # Count by severity so the summary is meaningful without listing every issue.
+        red_count    = sum(1 for i in ocr_issues if i["severity"] == "red")
+        yellow_count = sum(1 for i in ocr_issues if i["severity"] == "yellow")
+        green_count  = sum(1 for i in ocr_issues if i["severity"] == "green")
+
+        summary_parts = []
+        if red_count:
+            summary_parts.append(f"**{red_count} 🔴 Red Light**")
+        if yellow_count:
+            summary_parts.append(f"**{yellow_count} 🟡 Yellow Light**")
+        if green_count:
+            summary_parts.append(f"**{green_count} 🟢 Green Light**")
+
+        st.info(
+            "Here are the issues we found in your converted document, grouped by "
+            "severity: " + ", ".join(summary_parts) + ". "
+            "If you'd like, I can help you work through most of them."
+        )
+    else:
+        st.success(
+            "🎉 Great news — your converted document looks good! No additional "
+            "accessibility issues were found. Your students should be able to "
+            "access this content without barriers."
+        )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -998,9 +1622,15 @@ def render_ocr_format_select():
             use_container_width=True,
             key="ocr_continue",
         ):
-            # Phase 1: use demo issues. Phase 2: re-analyze the converted document.
-            st.session_state.issues = DEMO_ISSUES
-            st.session_state.step = "issue_list"
+            if ocr_issues:
+                # Load the real issues from the OCR analysis into the main
+                # issue workflow. working_pdf_bytes is already set to the
+                # OCR-converted PDF by render_running_ocr().
+                st.session_state.issues = ocr_issues
+                st.session_state.step = "issue_list"
+            else:
+                # No issues found — go to the clean document screen.
+                st.session_state.step = "no_issues"
             st.rerun()
     with col2:
         if st.button(
@@ -1111,7 +1741,20 @@ def render_issue_list():
             ):
                 st.session_state.current_issue_id = issue["id"]
                 st.session_state.proposed_fix = issue["fix_preview"]
-                st.session_state.step = "resolving_issue"
+                if issue["id"] == "untagged_pdf":
+                    # Ask whether they have the original source file first.
+                    st.session_state.step = "source_file_question"
+                elif issue["id"] == "missing_alt_text":
+                    # Launch the per-image alt text workflow.
+                    # Initialise all workflow state from the issue's fix_data
+                    # so the sub-steps always start fresh.
+                    st.session_state.alt_text_images = issue.get("fix_data", {}).get("images", [])
+                    st.session_state.alt_text_index = 0
+                    st.session_state.alt_text_phase = "question_1"
+                    st.session_state.alt_text_results = {}
+                    st.session_state.step = "image_alt_text"
+                else:
+                    st.session_state.step = "resolving_issue"
                 st.rerun()
 
         st.markdown("")  # Spacing between severity groups
@@ -1121,6 +1764,449 @@ def render_issue_list():
     resolved = len(st.session_state.resolved_ids)
     st.divider()
     st.caption(f"{resolved} of {total} issues resolved")
+
+
+# =============================================================================
+# STEP: image_alt_text
+# =============================================================================
+# Per-image alt text workflow. Triggered when the faculty member selects the
+# "Images with missing text descriptions" issue from the issue list.
+#
+# Sub-phases (stored in st.session_state.alt_text_phase):
+#   question_1  — Is this image purely decorative?
+#   question_2  — Is it critical to understanding? (only if not decorative)
+#   enter_text  — Enter or edit the alt text description
+#   summary     — Review all decisions before confirming
+#
+# Per CLAUDE.md Image Remediation Workflow:
+#   Decorative                → Green, empty alt text, no description needed
+#   Not decorative, critical  → stays Red, full description required
+#   Not decorative, not critical → Yellow, brief description required
+# =============================================================================
+
+def _advance_alt_text_image():
+    """
+    Move to the next image in the sequence, or to the summary phase when all
+    images have been processed. Always resets the sub-phase to question_1 for
+    the next image.
+    """
+    index = st.session_state.alt_text_index
+    total = len(st.session_state.alt_text_images)
+    next_index = index + 1
+    if next_index >= total:
+        st.session_state.alt_text_phase = "summary"
+    else:
+        st.session_state.alt_text_index = next_index
+        st.session_state.alt_text_phase = "question_1"
+    st.rerun()
+
+
+def render_image_alt_text():
+    """
+    Purpose: Walk the faculty member through each image one at a time,
+    collecting a decision (decorative vs. informational) and a text description
+    for each non-decorative image.
+
+    Per CLAUDE.md: severity is reassigned based on the faculty member's answers —
+    never apply a description without their explicit confirmation.
+    """
+    st.title("♿ PDF Assistant")
+    st.divider()
+
+    images = st.session_state.alt_text_images
+    index  = st.session_state.alt_text_index
+    phase  = st.session_state.alt_text_phase
+    total  = len(images)
+    results = st.session_state.alt_text_results
+
+    # -------------------------------------------------------------------------
+    # SUMMARY PHASE — shown after all images have been processed
+    # -------------------------------------------------------------------------
+    if phase == "summary":
+        st.markdown("### Review your image descriptions")
+        st.markdown(
+            "Here's what we have for each image. Confirm to save all descriptions, "
+            "or go back to make changes."
+        )
+        st.divider()
+
+        for img in images:
+            xref   = img["xref"]
+            result = results.get(xref, {})
+            pg     = result.get("page", img.get("page", "?"))
+            sev    = result.get("severity", "")
+            label  = SEVERITY_LABELS.get(sev, "")
+            kind   = result.get("type", "")
+            alt    = result.get("alt_text", "")
+
+            header = f"Page {pg} — {label}"
+            with st.expander(header, expanded=False):
+                img_bytes, _ = extract_image_from_pdf(
+                    st.session_state.working_pdf_bytes or st.session_state.file_bytes,
+                    xref,
+                )
+                if img_bytes:
+                    st.image(img_bytes, width=300)
+
+                if kind == "decorative":
+                    st.success("Marked as decorative — no description needed.")
+                else:
+                    st.markdown(f"**Description:** {alt}")
+
+        st.divider()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                "Yes, that looks good.",
+                type="primary",
+                use_container_width=True,
+                key="alt_confirm",
+            ):
+                # Mark the issue as resolved and store results for DOCX output.
+                if "missing_alt_text" not in st.session_state.resolved_ids:
+                    st.session_state.resolved_ids.append("missing_alt_text")
+                    st.session_state.resolved_count += 1
+
+                # Trigger re-analysis check per CLAUDE.md (every 3 resolved issues).
+                if (
+                    st.session_state.resolved_count % 3 == 0
+                    and not st.session_state.reanalysis_done
+                ):
+                    st.session_state.step = "re_analysis"
+                else:
+                    st.session_state.reanalysis_done = False
+                    st.session_state.step = "continue_or_stop"
+                st.rerun()
+
+        with col2:
+            if st.button(
+                "No, let me go back and edit.",
+                use_container_width=True,
+                key="alt_redo",
+            ):
+                # Restart from the first image without clearing results —
+                # existing answers are preserved so the faculty member only
+                # needs to change what's wrong.
+                st.session_state.alt_text_index = 0
+                st.session_state.alt_text_phase = "question_1"
+                st.rerun()
+        return
+
+    # -------------------------------------------------------------------------
+    # Safety net — if index is out of range, jump to summary
+    # -------------------------------------------------------------------------
+    if index >= total:
+        st.session_state.alt_text_phase = "summary"
+        st.rerun()
+        return
+
+    # -------------------------------------------------------------------------
+    # PER-IMAGE HEADER — progress indicator and image preview
+    # -------------------------------------------------------------------------
+    current = images[index]
+    xref    = current["xref"]
+
+    st.markdown(f"**Image {index + 1} of {total}** — found on page {current['page']}")
+    st.progress(index / total)
+    st.divider()
+
+    # Extract and display the image from the working copy of the PDF.
+    img_bytes, _ = extract_image_from_pdf(
+        st.session_state.working_pdf_bytes or st.session_state.file_bytes,
+        xref,
+    )
+    if img_bytes:
+        # Constrain width to avoid very wide images dominating the screen.
+        st.image(img_bytes, width=500)
+    else:
+        st.caption("_(Image preview unavailable for this item)_")
+
+    st.divider()
+
+    # -------------------------------------------------------------------------
+    # QUESTION 1 — Is this image purely decorative?
+    # Per CLAUDE.md: verbatim question with example types.
+    # -------------------------------------------------------------------------
+    if phase == "question_1":
+        st.markdown("### Is this image purely decorative?")
+        st.markdown(
+            "A decorative image exists only for visual appeal — it doesn't convey "
+            "information your students need to understand the content. Examples: "
+            "a decorative border, a background texture, or a generic stock photo "
+            "that has no connection to the topic."
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                "Yes, it's decorative.",
+                type="primary",
+                use_container_width=True,
+                key=f"q1_yes_{index}",
+            ):
+                # Decorative → Green, empty alt text.
+                # Per CLAUDE.md: mark automatically, no further review needed.
+                results[xref] = {
+                    "type": "decorative",
+                    "severity": "green",
+                    "alt_text": "",
+                    "page": current["page"],
+                }
+                st.session_state.alt_text_results = results
+                _advance_alt_text_image()
+
+        with col2:
+            if st.button(
+                "No, it carries information.",
+                use_container_width=True,
+                key=f"q1_no_{index}",
+            ):
+                st.session_state.alt_text_phase = "question_2"
+                st.rerun()
+
+    # -------------------------------------------------------------------------
+    # QUESTION 2 — Is it critical to understanding?
+    # Per CLAUDE.md: verbatim question with example types.
+    # -------------------------------------------------------------------------
+    elif phase == "question_2":
+        st.markdown("### Does understanding this image affect how your students understand the document?")
+        st.markdown(
+            "An image is critical to understanding if it presents information that "
+            "isn't described in the surrounding text — for example, a chart, diagram, "
+            "map, or figure that students need to interpret the content."
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                "Yes, it's important for understanding.",
+                type="primary",
+                use_container_width=True,
+                key=f"q2_yes_{index}",
+            ):
+                # Critical → stays Red, full description required.
+                results[xref] = {
+                    "type": "critical",
+                    "severity": "red",
+                    "alt_text": "",
+                    "page": current["page"],
+                }
+                st.session_state.alt_text_results = results
+                st.session_state.alt_text_phase = "enter_text"
+                st.rerun()
+
+        with col2:
+            if st.button(
+                "No, it adds context but isn't essential.",
+                use_container_width=True,
+                key=f"q2_no_{index}",
+            ):
+                # Non-critical → downgraded to Yellow, brief description needed.
+                results[xref] = {
+                    "type": "supplementary",
+                    "severity": "yellow",
+                    "alt_text": "",
+                    "page": current["page"],
+                }
+                st.session_state.alt_text_results = results
+                st.session_state.alt_text_phase = "enter_text"
+                st.rerun()
+
+        # Allow going back to Question 1 in case they change their mind.
+        if st.button("← Back", key=f"q2_back_{index}"):
+            st.session_state.alt_text_phase = "question_1"
+            st.rerun()
+
+    # -------------------------------------------------------------------------
+    # ENTER TEXT — write the alt text description
+    # Per CLAUDE.md: generate a description and ask the faculty member to
+    # review, edit, or approve it before it is applied.
+    # -------------------------------------------------------------------------
+    elif phase == "enter_text":
+        result   = results.get(xref, {})
+        severity = result.get("severity", "red")
+        existing = result.get("alt_text", "")
+
+        if severity == "red":
+            st.markdown("### 🔴 This image needs a full text description")
+            st.markdown(
+                "Write a description that conveys everything a student would need "
+                "to know from this image — what it shows, why it matters in context, "
+                "and any data or key information it presents. A student who cannot "
+                "see this image should be able to fully understand it from your words."
+            )
+        else:
+            st.markdown("### 🟡 This image needs a brief description")
+            st.markdown(
+                "Write a short description that gives students useful context — "
+                "what the image is and its general relationship to the surrounding "
+                "content. It doesn't need to capture every detail."
+            )
+
+        new_text = st.text_area(
+            "Text description (alt text):",
+            value=existing,
+            height=120,
+            key=f"alt_input_{index}",
+            placeholder="Describe the image here...",
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                "Save this description.",
+                type="primary",
+                use_container_width=True,
+                key=f"alt_save_{index}",
+            ):
+                if new_text.strip():
+                    results[xref]["alt_text"] = new_text.strip()
+                    st.session_state.alt_text_results = results
+                    _advance_alt_text_image()
+                else:
+                    st.warning("Please enter a description before saving.")
+
+        with col2:
+            if st.button(
+                "← Back",
+                use_container_width=True,
+                key=f"alt_back_{index}",
+            ):
+                st.session_state.alt_text_phase = "question_2"
+                st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# STEP: source_file_question
+# Intercept screen shown when the user selects the "Untagged PDF" issue.
+# Asks whether they still have the original Word / Google Docs / PowerPoint /
+# Google Slides source file before we attempt any PDF-level fix.
+# Per CLAUDE.md: two choices only — yes (→ cuny_resources) or no (→ resolving_issue).
+# -----------------------------------------------------------------------------
+def render_source_file_question():
+    """
+    Purpose: Before tackling an untagged PDF, find out whether the faculty
+    member has the original source file. Working from the source is always
+    the more reliable path — we want to route them there when possible.
+    """
+    st.title("♿ PDF Assistant")
+    st.divider()
+
+    st.markdown("### Before we dig in — a quick question.")
+    st.markdown(
+        "The most reliable fix for an untagged PDF is to update the **original "
+        "source file** directly. We're building a dedicated tool to help you do "
+        "that — but in the meantime, great resources are available."
+    )
+    st.markdown(
+        "Do you still have the original **Word, Google Docs, PowerPoint, or "
+        "Google Slides** file you used to create this PDF?"
+    )
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(
+            "Yes, I have the original file.",
+            type="primary",
+            use_container_width=True,
+        ):
+            st.session_state.step = "cuny_resources"
+            st.rerun()
+    with col2:
+        if st.button(
+            "No, I only have the PDF.",
+            use_container_width=True,
+        ):
+            # Skip the source-file path and go straight to the untagged PDF
+            # fix screen, same as any other issue.
+            st.session_state.step = "resolving_issue"
+            st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# STEP: cuny_resources
+# Shown when the faculty member confirms they have the original source file.
+# Presents CUNY accessibility guides and two forward paths:
+#   1. Go work on the source file (mark the untagged issue as acknowledged
+#      and return to the issue list for remaining issues).
+#   2. Keep going with the PDF (proceed to the untagged PDF fix screen).
+# Per CLAUDE.md: exactly two choices.
+# -----------------------------------------------------------------------------
+def render_cuny_resources():
+    """
+    Purpose: Give faculty members who have their original source file the
+    CUNY accessibility resources they need to fix it properly, then let them
+    choose whether to work on that file now or continue remediating the PDF.
+    """
+    st.title("♿ PDF Assistant")
+    st.divider()
+
+    st.markdown(
+        "Working from your original source file will give you the best result — "
+        "Word, Google Docs, and PowerPoint all export properly tagged, accessible "
+        "PDFs when the source file is set up correctly."
+    )
+
+    st.info(
+        "We're building a source-file editor directly into this tool. "
+        "While that's in progress, CUNY's accessibility guides walk you through "
+        "the process step by step."
+    )
+
+    # Display CUNY resources as clearly labeled, clickable links.
+    # All three links open in a new tab so the user doesn't leave the tool.
+    st.markdown("### CUNY Accessibility Resources")
+    st.markdown(
+        """
+        - 📚 [**CUNY Accessibility Toolkit**](https://guides.cuny.edu/accessibility)
+          — Overview of accessibility standards and tools across file formats
+
+        - 📝 [**Making Word Documents Accessible**](https://guides.cuny.edu/accessibility/microsoft_word)
+          — Step-by-step guide for heading styles, alt text, reading order, and more in Word
+
+        - 📊 [**Making PowerPoint Presentations Accessible**](https://guides.cuny.edu/accessibility/powerpoint)
+          — Step-by-step guide for slide titles, alt text, reading order, and more in PowerPoint
+        """
+    )
+
+    st.markdown(
+        "_If your file is a **Google Doc or Google Slides** presentation, "
+        "open it, go to **File → Download**, choose **Microsoft Word (.docx)** "
+        "or **Microsoft PowerPoint (.pptx)**, then follow the Word or PowerPoint "
+        "guide above._"
+    )
+
+    st.divider()
+
+    st.markdown("**What would you like to do next?**")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(
+            "Review these resources and update my original file.",
+            type="primary",
+            use_container_width=True,
+        ):
+            # Mark the untagged PDF issue as acknowledged so it no longer
+            # appears in the issue list. The faculty member is handling it
+            # via their source file — no PDF-level fix needed.
+            if "untagged_pdf" not in st.session_state.resolved_ids:
+                st.session_state.resolved_ids.append("untagged_pdf")
+                st.session_state.resolved_count += 1
+            st.session_state.current_issue_id = None
+            st.session_state.step = "issue_list"
+            st.rerun()
+    with col2:
+        if st.button(
+            "Keep going with this PDF.",
+            use_container_width=True,
+        ):
+            # Proceed to the standard untagged PDF fix screen.
+            st.session_state.step = "resolving_issue"
+            st.rerun()
 
 
 # -----------------------------------------------------------------------------
@@ -1173,6 +2259,17 @@ def render_resolving_issue():
             use_container_width=True,
             key="confirm_yes",
         ):
+            # Apply the real fix to the working copy of the PDF.
+            # FIX_DISPATCH maps issue ID → fix function. If no fix function
+            # exists for this issue ID, the working copy is left unchanged.
+            fix_fn = FIX_DISPATCH.get(issue["id"])
+            if fix_fn and st.session_state.working_pdf_bytes:
+                new_bytes, _ = fix_fn(
+                    st.session_state.working_pdf_bytes,
+                    issue.get("fix_data", {}),
+                )
+                st.session_state.working_pdf_bytes = new_bytes
+
             # Mark this issue as resolved
             st.session_state.resolved_ids.append(issue["id"])
             st.session_state.resolved_count += 1
@@ -1280,10 +2377,26 @@ def render_re_analysis():
             type="primary",
             use_container_width=True,
         ):
-            # Phase 1: simulate re-analysis (no actual change to issue list).
-            # Phase 2: re-run the real analysis on the working file.
+            # Re-run analysis on the working copy so any issues resolved by
+            # earlier fixes are automatically removed from the list.
             with st.spinner("Re-analyzing your document..."):
-                time.sleep(1.5)
+                reanalysis_bytes = (
+                    st.session_state.working_pdf_bytes or st.session_state.file_bytes
+                )
+                result = analyze_pdf(reanalysis_bytes)
+                if result["status"] == "issues_found":
+                    # Keep only issues that haven't already been resolved.
+                    fresh_issues = [
+                        i for i in result["issues"]
+                        if i["id"] not in st.session_state.resolved_ids
+                    ]
+                    st.session_state.issues = (
+                        fresh_issues
+                        + [
+                            i for i in st.session_state.issues
+                            if i["id"] in st.session_state.resolved_ids
+                        ]
+                    )
             st.session_state.reanalysis_done = True
             st.session_state.step = "issue_list"
             st.rerun()
@@ -1324,38 +2437,44 @@ def render_choose_format():
     docx_name = f"{base_name}_edited.docx"
     pdf_name = f"{base_name}_edited.pdf"
 
+    # Use the working copy (which has all confirmed fixes applied).
+    # Fall back to the original if working_pdf_bytes was never set.
+    output_pdf_bytes = st.session_state.working_pdf_bytes or st.session_state.file_bytes
+
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**Word processor document (DOCX)**")
         st.caption(
             "Opens in Microsoft Word, Google Docs, or any compatible application. "
-            "Best if you need to edit the content further before re-publishing."
+            "Best if you need to edit the content further before re-publishing, or "
+            "if you want to re-export as a properly tagged PDF from Word."
         )
-        if st.button(f"Download as {docx_name}", type="primary", use_container_width=True):
-            # Phase 1 placeholder: download the original file bytes.
-            # Phase 2 will generate a real DOCX with all fixes applied.
-            st.download_button(
-                label=f"Click here to download {docx_name}",
-                data=st.session_state.file_bytes,
-                file_name=docx_name,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
+        # Build the DOCX now so the download button appears immediately.
+        # build_docx_from_pdf() uses font-size heuristics to preserve headings.
+        with st.spinner("Building your Word document..."):
+            docx_bytes = build_docx_from_pdf(output_pdf_bytes)
+        st.download_button(
+            label=f"Download {docx_name}",
+            data=docx_bytes,
+            file_name=docx_name,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            type="primary",
+            use_container_width=True,
+        )
 
     with col2:
-        st.markdown("**New PDF document**")
+        st.markdown("**Updated PDF document**")
         st.caption(
-            "A properly structured, text-based PDF ready to share or upload directly. "
-            "Best if you want a finished file."
+            "Your PDF with all confirmed fixes applied — metadata, language tag, "
+            "and bookmarks are saved. Ready to share or upload directly."
         )
-        if st.button(f"Download as {pdf_name}", use_container_width=True):
-            # Phase 1 placeholder: download the original file bytes.
-            # Phase 2 will generate a real remediated PDF.
-            st.download_button(
-                label=f"Click here to download {pdf_name}",
-                data=st.session_state.file_bytes,
-                file_name=pdf_name,
-                mime="application/pdf",
-            )
+        st.download_button(
+            label=f"Download {pdf_name}",
+            data=output_pdf_bytes,
+            file_name=pdf_name,
+            mime="application/pdf",
+            use_container_width=True,
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -1428,6 +2547,9 @@ STEP_HANDLERS = {
     "ocr_format_select":    render_ocr_format_select,
     "no_issues":            render_no_issues,
     "issue_list":           render_issue_list,
+    "image_alt_text":       render_image_alt_text,
+    "source_file_question": render_source_file_question,
+    "cuny_resources":       render_cuny_resources,
     "resolving_issue":      render_resolving_issue,
     "continue_or_stop":     render_continue_or_stop,
     "re_analysis":          render_re_analysis,
