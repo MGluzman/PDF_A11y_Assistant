@@ -338,9 +338,11 @@ def build_pdf(pages_text):
         for line in page_text.splitlines():
             stripped = line.strip()
             if stripped:
-                # Paragraph() wraps text automatically within the page margins.
-                story.append(Paragraph(stripped, styles["Normal"]))
-                # Spacer adds a small gap between lines for readability.
+                # ReportLab's Paragraph parses text as XML, so < > & characters
+                # from OCR output must be escaped or they crash the renderer.
+                import html as _html
+                safe = _html.escape(stripped)
+                story.append(Paragraph(safe, styles["Normal"]))
                 story.append(Spacer(1, 4))
 
     # Append the conversion disclaimer on its own page (CLAUDE.md OCR Step 6).
@@ -350,6 +352,251 @@ def build_pdf(pages_text):
     # build() renders all the story elements into the output buffer.
     doc_rl.build(story)
     return output.getvalue()
+
+
+# =============================================================================
+# OCR QUALITY SCORING
+# =============================================================================
+# score_ocr_quality() measures how "word-like" the extracted text is.
+# Gibberish OCR output tends to have a high proportion of tokens that are
+# not real words — random symbol runs, single stray characters, sequences
+# of digits mixed with letters, etc.
+#
+# Approach: split text into whitespace-separated tokens and count what
+# fraction are "clean words" — tokens made entirely of letters, apostrophes,
+# or hyphens, with length between 2 and 30 characters.
+#
+# Returns a float 0–100 (percentage) and a label: "Good", "Fair", or "Poor".
+# Displayed in the UI as ✅ / ⚠️ / ❌ — intentionally different from the
+# 🔴/🟡/🟢 accessibility severity scheme used elsewhere in the app.
+# =============================================================================
+
+def score_ocr_quality(pages_text):
+    """
+    Estimate OCR output quality as a percentage of word-like tokens.
+
+    Parameters:
+        pages_text (list[str]): One string per page from run_ocr().
+
+    Returns:
+        (float, str): Score 0–100 and a label ("Good", "Fair", or "Poor").
+    """
+    import re
+    full_text = " ".join(pages_text)
+    tokens = full_text.split()
+    if not tokens:
+        return 0.0, "Poor"
+
+    word_pattern = re.compile(r"^[A-Za-z][A-Za-z'\-]{1,29}$")
+    clean = sum(1 for t in tokens if word_pattern.match(t))
+    score = (clean / len(tokens)) * 100
+
+    if score >= 72:
+        label = "Good"
+    elif score >= 45:
+        label = "Fair"
+    else:
+        label = "Poor"
+
+    return round(score, 1), label
+
+
+# =============================================================================
+# EASYOCR FALLBACK
+# =============================================================================
+# run_easyocr() is the second-pass OCR engine. It uses a neural-network model
+# (CRAFT text detector + CRNN recogniser) which handles skewed, low-contrast,
+# and unusual-font scans better than Tesseract's pattern matching.
+#
+# EasyOCR is only invoked when:
+#   a) Tesseract quality was flagged as Fair or Poor, AND
+#   b) The faculty member explicitly chooses to run it.
+#
+# On first call EasyOCR downloads ~200 MB of model weights. Subsequent calls
+# reuse the cached models. gpu=False ensures it runs on any machine.
+# =============================================================================
+
+def run_easyocr(file_bytes):
+    """
+    Extract text from every page of a scanned PDF using EasyOCR.
+
+    Renders each page at 300 DPI (same as Tesseract pass), converts to a
+    numpy array, and passes it to the EasyOCR reader. Results are sorted
+    top-to-bottom by bounding-box Y coordinate to approximate reading order.
+
+    Parameters:
+        file_bytes (bytes): Raw bytes of the uploaded PDF.
+
+    Returns:
+        list[str]: Extracted text for each page, in document order.
+
+    Raises:
+        Exception: Re-raised so the caller can show a user-facing error.
+    """
+    import easyocr
+    import numpy as np
+
+    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    pages_text = []
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        mat = fitz.Matrix(300 / 72, 300 / 72)
+        pix = page.get_pixmap(matrix=mat)
+        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height, pix.width, pix.n
+        )
+        # EasyOCR expects RGB; PyMuPDF gives RGB or RGBA depending on the page.
+        if pix.n == 4:
+            img_array = img_array[:, :, :3]
+
+        results = reader.readtext(img_array)
+
+        # Sort detections top-to-bottom by the top-left Y coordinate of the
+        # bounding box so text flows in visual reading order.
+        results.sort(key=lambda r: r[0][0][1])
+        page_text = " ".join(r[1] for r in results)
+        pages_text.append(page_text)
+
+    doc.close()
+    return pages_text
+
+
+# =============================================================================
+# PAGE PREPROCESSING — ORIENTATION & SKEW CORRECTION
+# =============================================================================
+# preprocess_pages() runs before any OCR engine. It renders each PDF page as
+# a PIL Image at 300 DPI, then applies two corrections automatically:
+#
+#   1. Orientation correction — Tesseract OSD detects if the page was scanned
+#      sideways (90°), upside-down (180°), or at 270°, and rotates it upright.
+#
+#   2. Skew correction — OpenCV's minAreaRect finds the dominant angle of text
+#      lines and applies a small rotation to straighten them. Only applied when
+#      the detected angle is more than 0.5° (below that it's measurement noise).
+#
+# Returns the corrected PIL Images and a human-readable processing log that is
+# shown in the "What we did" summary after OCR completes.
+# =============================================================================
+
+def _deskew_image(pil_image):
+    """
+    Detect and correct slight skew in a PIL Image using OpenCV.
+
+    Converts to grayscale, thresholds to find text pixels, fits a minimum
+    bounding rectangle to those pixels, and rotates by the detected angle.
+
+    Parameters:
+        pil_image (PIL.Image): The page image to deskew.
+
+    Returns:
+        (PIL.Image, float): Corrected image and the angle applied (degrees).
+                            Returns (original_image, 0.0) if skew is negligible
+                            or detection fails.
+    """
+    import cv2
+    import numpy as np
+
+    try:
+        gray = np.array(pil_image.convert("L"))
+        _, thresh = cv2.threshold(
+            gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+        coords = np.column_stack(np.where(thresh > 0))
+        if len(coords) < 100:   # too few text pixels to measure reliably
+            return pil_image, 0.0
+
+        angle = cv2.minAreaRect(coords)[-1]
+        # minAreaRect returns angles in [-90, 0). Normalise to a signed value.
+        if angle < -45:
+            angle = -(90 + angle)
+        else:
+            angle = -angle
+
+        if abs(angle) < 0.5:    # below threshold — not worth correcting
+            return pil_image, 0.0
+
+        (h, w) = gray.shape[:2]
+        M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+        img_array = np.array(pil_image)
+        rotated = cv2.warpAffine(
+            img_array, M, (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+        return Image.fromarray(rotated), angle
+    except Exception:
+        return pil_image, 0.0
+
+
+def preprocess_pages(file_bytes, tesseract_path):
+    """
+    Render every PDF page at 300 DPI and apply orientation and skew correction.
+
+    Called once before running Tesseract. The corrected PIL Images are passed
+    directly to the OCR engine so the same preprocessing applies whether we
+    run Tesseract or EasyOCR.
+
+    Parameters:
+        file_bytes (bytes): Raw bytes of the uploaded PDF.
+        tesseract_path (str): Path to the Tesseract binary (needed for OSD).
+
+    Returns:
+        (list[PIL.Image], list[str]):
+            - Corrected page images in document order.
+            - Human-readable log entries describing what was done to each page.
+    """
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    page_count = len(doc)
+    pil_images = []
+    log_entries = [f"✔ {page_count} page{'s' if page_count != 1 else ''} detected"]
+
+    pages_rotated = 0
+    pages_deskewed = 0
+
+    for page_num in range(page_count):
+        page = doc[page_num]
+        mat = fitz.Matrix(300 / 72, 300 / 72)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+        # Step 1 — Orientation correction via Tesseract OSD.
+        # OSD returns the clockwise rotation needed to make text upright.
+        # We skip silently if OSD fails (low-text pages confuse it).
+        try:
+            osd = pytesseract.image_to_osd(
+                img, output_type=pytesseract.Output.DICT
+            )
+            rotate = osd.get("rotate", 0)
+            if rotate and rotate != 0:
+                # PIL.rotate is counter-clockwise; OSD gives clockwise degrees.
+                img = img.rotate(-rotate, expand=True)
+                log_entries.append(
+                    f"✔ Page {page_num + 1}: orientation corrected (rotated {rotate}°)"
+                )
+                pages_rotated += 1
+        except Exception:
+            pass
+
+        # Step 2 — Skew correction via OpenCV.
+        img, skew_angle = _deskew_image(img)
+        if abs(skew_angle) > 0.5:
+            log_entries.append(
+                f"✔ Page {page_num + 1}: skew corrected ({skew_angle:+.1f}°)"
+            )
+            pages_deskewed += 1
+
+        pil_images.append(img)
+
+    doc.close()
+
+    if pages_rotated == 0 and pages_deskewed == 0:
+        log_entries.append("✔ All pages: orientation and alignment look correct")
+
+    return pil_images, log_entries
 
 
 # =============================================================================
@@ -1224,6 +1471,10 @@ def init_state():
         "ocr_docx_bytes": None,     # Prebuilt DOCX bytes for the _readable download
         "ocr_pdf_bytes": None,      # Prebuilt PDF bytes for the _readable download
         "ocr_issues": [],           # Accessibility issues found in the OCR-converted PDF
+        "ocr_quality_score": None,  # Float 0–100 from score_ocr_quality()
+        "ocr_quality_label": None,  # "Good", "Fair", or "Poor"
+        "ocr_engine_used": None,    # "tesseract" or "easyocr" — shown in preview
+        "ocr_processing_log": [],   # Step-by-step log shown in "What we did"
         "working_pdf_bytes": None,  # Running copy of the PDF — updated as fixes are applied
         "alt_text_images": [],      # Image list from the missing_alt_text issue's fix_data
         "alt_text_index": 0,        # Index of the image currently being worked on
@@ -1549,6 +1800,17 @@ def render_scanned_doc():
         "WCAG 2.1 SC 1.4.5 — Images of Text | Title II ADA, 28 CFR Part 35"
     )
 
+    # Scan quality disclaimer — sets expectations without blocking the workflow.
+    # Orientation and skew are handled automatically; contrast is the one factor
+    # the software cannot correct for.
+    st.caption(
+        "💡 **Tip:** The conversion tool will automatically detect and correct "
+        "page orientation and slight skew. For best results, make sure your scan "
+        "has clear contrast between the text and background — very faint or "
+        "washed-out scans may still produce inaccurate text regardless of the "
+        "scanner used."
+    )
+
     col1, col2 = st.columns(2)
     with col1:
         if st.button(
@@ -1648,62 +1910,192 @@ def render_running_ocr():
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
     )
 
-    ocr_error = None  # Will hold an error message string if OCR fails
+    preprocess_error = None
+    ocr_error        = None
 
     with st.spinner(
-        "Converting your scanned pages to readable text — this may take a moment "
-        "for longer documents..."
+        "Checking page orientation, correcting any skew, then converting to "
+        "readable text — this may take a moment for longer documents..."
     ):
+        # ---- Step 1: Preprocessing (orientation + skew) ----
+        # Separated from OCR so failures give accurate error messages.
         try:
-            # Steps 1-3: Extract text from every page using Tesseract.
-            pages_text = run_ocr(st.session_state.file_bytes, tesseract_path)
-
-            # Step 4: Build both output formats while the spinner is still
-            # showing. Storing bytes in session_state means the format
-            # selection screen can serve downloads instantly without re-running OCR.
-            st.session_state.ocr_pages_text = pages_text
-            st.session_state.ocr_docx_bytes = build_docx(pages_text)
-            ocr_pdf_bytes = build_pdf(pages_text)
-            st.session_state.ocr_pdf_bytes  = ocr_pdf_bytes
-
-            # Per CLAUDE.md OCR Step 7: run accessibility analysis on the
-            # converted document now, while the spinner is visible, so the
-            # format select screen can present real issue counts immediately.
-            # We analyze the PDF version of the output because analyze_pdf()
-            # works on PDF bytes — it's the same content either way.
-            analysis_result = analyze_pdf(ocr_pdf_bytes)
-            if analysis_result["status"] == "issues_found":
-                st.session_state.ocr_issues = analysis_result["issues"]
-            else:
-                st.session_state.ocr_issues = []
-
-            # The OCR-converted PDF becomes the new working copy. All
-            # subsequent fixes are applied to this document, not the original
-            # scanned file.
-            st.session_state.working_pdf_bytes = ocr_pdf_bytes
-
+            pil_images, preprocessing_log = preprocess_pages(
+                st.session_state.file_bytes, tesseract_path
+            )
         except Exception as e:
-            # Capture the error — we'll display it after the spinner exits.
-            # Common causes: Tesseract binary not found, wrong path, or missing
-            # language data files (e.g. tesseract-ocr-eng not installed).
-            ocr_error = str(e)
+            preprocess_error = str(e)
+            # Fall back to plain page renders with no preprocessing applied.
+            try:
+                doc = fitz.open(stream=st.session_state.file_bytes, filetype="pdf")
+                pil_images = []
+                for page_num in range(len(doc)):
+                    pix = doc[page_num].get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+                    pil_images.append(Image.open(io.BytesIO(pix.tobytes("png"))))
+                doc.close()
+                preprocessing_log = [
+                    f"✔ {len(pil_images)} page{'s' if len(pil_images) != 1 else ''} detected",
+                    f"⚠️ Orientation/skew correction skipped — {preprocess_error}",
+                ]
+            except Exception:
+                pil_images = []
+                preprocessing_log = []
+
+        # ---- Step 2: OCR ----
+        if pil_images:
+            try:
+                pytesseract.pytesseract.tesseract_cmd = tesseract_path
+                pages_text = [
+                    pytesseract.image_to_string(img, lang="eng")
+                    for img in pil_images
+                ]
+
+                quality_score, quality_label = score_ocr_quality(pages_text)
+                st.session_state.ocr_quality_score  = quality_score
+                st.session_state.ocr_quality_label  = quality_label
+                st.session_state.ocr_engine_used    = "tesseract"
+                st.session_state.ocr_processing_log = preprocessing_log + [
+                    "✔ OCR performed using Tesseract",
+                    f"✔ Quality estimate: "
+                    f"{'✅' if quality_label == 'Good' else '⚠️' if quality_label == 'Fair' else '❌'} "
+                    f"{quality_label} ({quality_score}%)",
+                ]
+                st.session_state.ocr_pages_text = pages_text
+                st.session_state.ocr_docx_bytes = build_docx(pages_text)
+                ocr_pdf_bytes = build_pdf(pages_text)
+                st.session_state.ocr_pdf_bytes  = ocr_pdf_bytes
+
+                analysis_result = analyze_pdf(ocr_pdf_bytes)
+                st.session_state.ocr_issues = (
+                    analysis_result["issues"]
+                    if analysis_result["status"] == "issues_found"
+                    else []
+                )
+                st.session_state.working_pdf_bytes = ocr_pdf_bytes
+
+            except Exception as e:
+                ocr_error = str(e)
+        else:
+            ocr_error = "Could not render pages from this PDF."
 
     if ocr_error:
-        # Show a clear, actionable error — never a raw Python traceback.
         st.error(
             "🔴 **Conversion failed — Tesseract OCR could not run.**\n\n"
             "This usually means Tesseract is not installed, or the path in the "
             "sidebar settings is incorrect.\n\n"
-            f"**Error details:** {ocr_error}\n\n"
+            f"**Error details:** `{ocr_error}`\n\n"
             "Please check the Tesseract path in the ⚙️ Settings panel on the left, "
-            "then try again. If Tesseract is not installed, you can download it from "
-            "the link in the sidebar help text."
+            "then try again."
         )
+        if preprocess_error:
+            st.warning(
+                f"Note: page preprocessing also reported an issue: `{preprocess_error}`"
+            )
         if st.button("← Go back", type="primary"):
             st.session_state.step = "scanned_doc"
             st.rerun()
     else:
         # Step 5: OCR succeeded — transition to the format selection screen.
+        st.session_state.step = "ocr_format_select"
+        st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# STEP: running_easyocr
+# Second-pass OCR using EasyOCR, triggered when the faculty member chooses
+# to try the enhanced scanner after reviewing the Tesseract preview.
+# Follows the same structure as render_running_ocr(): runs inside a spinner,
+# stores output in session_state, then transitions back to ocr_format_select
+# so the user can compare the new result in the same preview UI.
+# -----------------------------------------------------------------------------
+def render_running_easyocr():
+    """
+    Purpose: Run EasyOCR as a second-pass scanner on the original uploaded PDF.
+
+    EasyOCR uses a neural-network text detector and recogniser that handles
+    low-quality scans, unusual fonts, and skewed pages better than Tesseract.
+    It is slower and requires model weights (~200 MB, downloaded on first run).
+
+    On success, overwrites ocr_pages_text, ocr_docx_bytes, ocr_pdf_bytes,
+    ocr_quality_score, ocr_quality_label, and ocr_engine_used in session_state,
+    then returns to ocr_format_select for the faculty member to review.
+    """
+    st.title("♿ PDF Assistant")
+    st.divider()
+
+    easyocr_error = None
+
+    with st.spinner(
+        "Running the enhanced scanner — this may take a minute or two for "
+        "longer documents. Hang tight..."
+    ):
+        try:
+            tesseract_path = st.session_state.get(
+                "tesseract_path",
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            )
+
+            # Re-run preprocessing to get corrected images.
+            # The preprocessing log from the Tesseract pass is already stored
+            # — we keep those entries and only update the OCR-specific lines.
+            pil_images, preprocessing_log = preprocess_pages(
+                st.session_state.file_bytes, tesseract_path
+            )
+
+            # Run EasyOCR on the corrected images.
+            import easyocr as _easyocr
+            import numpy as np
+            reader = _easyocr.Reader(["en"], gpu=False, verbose=False)
+            pages_text = []
+            for img in pil_images:
+                img_array = np.array(img)
+                if img_array.ndim == 3 and img_array.shape[2] == 4:
+                    img_array = img_array[:, :, :3]
+                results = reader.readtext(img_array)
+                results.sort(key=lambda r: r[0][0][1])
+                pages_text.append(" ".join(r[1] for r in results))
+
+            quality_score, quality_label = score_ocr_quality(pages_text)
+
+            # Build updated log: same preprocessing entries, new OCR line.
+            processing_log = preprocessing_log + [
+                "✔ OCR performed using EasyOCR (enhanced scanner)",
+                f"✔ Quality estimate: "
+                f"{'✅' if quality_label == 'Good' else '⚠️' if quality_label == 'Fair' else '❌'} "
+                f"{quality_label} ({quality_score}%)",
+            ]
+
+            st.session_state.ocr_pages_text    = pages_text
+            st.session_state.ocr_quality_score = quality_score
+            st.session_state.ocr_quality_label = quality_label
+            st.session_state.ocr_engine_used   = "easyocr"
+            st.session_state.ocr_processing_log = processing_log
+            st.session_state.ocr_docx_bytes    = build_docx(pages_text)
+            ocr_pdf_bytes                       = build_pdf(pages_text)
+            st.session_state.ocr_pdf_bytes     = ocr_pdf_bytes
+
+            analysis_result = analyze_pdf(ocr_pdf_bytes)
+            st.session_state.ocr_issues = (
+                analysis_result["issues"]
+                if analysis_result["status"] == "issues_found"
+                else []
+            )
+            st.session_state.working_pdf_bytes = ocr_pdf_bytes
+
+        except Exception as e:
+            easyocr_error = str(e)
+
+    if easyocr_error:
+        st.error(
+            "🔴 **Enhanced scan failed.**\n\n"
+            f"**Error details:** {easyocr_error}\n\n"
+            "You can still download the Tesseract version of your document."
+        )
+        if st.button("← Go back to previous result", type="primary"):
+            st.session_state.ocr_engine_used = "tesseract"
+            st.session_state.step = "ocr_format_select"
+            st.rerun()
+    else:
         st.session_state.step = "ocr_format_select"
         st.rerun()
 
@@ -1739,6 +2131,117 @@ def render_ocr_format_select():
         f"Conversion complete — {page_count} page{'s' if page_count != 1 else ''} "
         "of readable text extracted successfully."
     )
+
+    # -------------------------------------------------------------------------
+    # PROCESSING SUMMARY — "What we did"
+    # Transparent step-by-step log of every action taken: page count,
+    # orientation corrections, skew corrections, engine used, quality score.
+    # Shown as a collapsed expander so it's available without dominating.
+    # -------------------------------------------------------------------------
+    processing_log = st.session_state.get("ocr_processing_log", [])
+    if processing_log:
+        with st.expander("📋 What we did", expanded=False):
+            for entry in processing_log:
+                st.markdown(entry)
+
+    st.divider()
+
+    # -------------------------------------------------------------------------
+    # OCR QUALITY INDICATOR + TEXT PREVIEW
+    # Show the quality estimate so the faculty member can decide whether to
+    # accept the result or request a second pass with EasyOCR.
+    # -------------------------------------------------------------------------
+    pages_text    = st.session_state.ocr_pages_text
+    quality_score = st.session_state.get("ocr_quality_score")
+    quality_label = st.session_state.get("ocr_quality_label", "Unknown")
+    engine_used   = st.session_state.get("ocr_engine_used", "Tesseract")
+
+    # Quality badge — distinct from the red/yellow/green accessibility severity
+    # scheme. Uses ✅ / ⚠️ / ❌ so the two scales are never visually confused.
+    badge = {"Good": "✅", "Fair": "⚠️", "Poor": "❌"}.get(quality_label, "⚪")
+    engine_display = "Tesseract OCR" if engine_used == "tesseract" else "EasyOCR (enhanced)"
+
+    st.markdown(
+        f"**Text quality estimate:** {badge} {quality_label} "
+        f"({quality_score}% word-like tokens) — scanned using {engine_display}"
+    )
+
+    # Contextual message explaining what the score means
+    if quality_label == "Good":
+        st.caption(
+            "The extracted text looks reliable. Review the preview below to "
+            "confirm before downloading."
+        )
+    elif quality_label == "Fair":
+        st.caption(
+            "The extraction looks partially readable but some words may be "
+            "inaccurate. Review the preview below — if you see significant "
+            "errors, you can try the enhanced scanner."
+        )
+    else:
+        st.caption(
+            "The extraction quality looks low — the text may contain significant "
+            "errors. Review the preview below and consider trying the enhanced "
+            "scanner for a better result."
+        )
+
+    # Preview expander — always shown so the user can judge for themselves
+    with st.expander(
+        f"👁 Preview extracted text ({page_count} page{'s' if page_count != 1 else ''})",
+        expanded=(quality_label in ("Fair", "Poor")),  # auto-open if quality is low
+    ):
+        st.caption(
+            "This is the text extracted from your scanned document. "
+            "Review it for accuracy before downloading."
+        )
+        for i, page_text in enumerate(pages_text):
+            st.markdown(f"**Page {i + 1}**")
+            st.text_area(
+                label=f"page_{i + 1}",
+                value=page_text.strip() if page_text.strip() else "(No text detected on this page)",
+                height=200,
+                disabled=True,
+                label_visibility="collapsed",
+                key=f"ocr_preview_page_{i}",
+            )
+            if i < len(pages_text) - 1:
+                st.divider()
+
+    # -------------------------------------------------------------------------
+    # HUMAN-IN-THE-LOOP: offer EasyOCR second pass
+    # Only offered when Tesseract was the engine used (no point re-running
+    # EasyOCR on itself) and quality was not already Good.
+    # -------------------------------------------------------------------------
+    if engine_used == "tesseract" and quality_label in ("Fair", "Poor"):
+        st.info(
+            "**Not happy with the result?** I can try again using a more powerful "
+            "scanner (EasyOCR) that handles difficult scans better. It takes a "
+            "little longer, but often produces more accurate text."
+        )
+        if st.button(
+            "Try the enhanced scanner",
+            use_container_width=True,
+            key="try_easyocr",
+        ):
+            st.session_state.step = "running_easyocr"
+            st.rerun()
+    elif engine_used == "tesseract" and quality_label == "Good":
+        # Offer EasyOCR optionally even when quality looks good, but don't push it
+        with st.expander("Want to try the enhanced scanner anyway?", expanded=False):
+            st.caption(
+                "The quality estimate looks good, but automated scoring isn't "
+                "perfect. If you spot errors in the preview, you can still try "
+                "the enhanced scanner."
+            )
+            if st.button(
+                "Try the enhanced scanner",
+                use_container_width=True,
+                key="try_easyocr_optional",
+            ):
+                st.session_state.step = "running_easyocr"
+                st.rerun()
+
+    st.divider()
 
     st.markdown(
         "Your converted file is ready to download. Choose a format below — "
@@ -2800,6 +3303,7 @@ STEP_HANDLERS = {
     "scanned_doc":          render_scanned_doc,
     "scanned_goodbye":      render_scanned_goodbye,
     "running_ocr":          render_running_ocr,
+    "running_easyocr":      render_running_easyocr,
     "ocr_format_select":    render_ocr_format_select,
     "no_issues":            render_no_issues,
     "issue_list":           render_issue_list,
