@@ -1,6 +1,6 @@
 # To Do Next — Agentic AI Accessibility Suite
 
-**Last updated:** 2026-03-31 — 6:45 PM
+**Last updated:** 2026-03-31 — 7:10 PM
 
 ---
 
@@ -26,7 +26,29 @@ Checklist:
 
 ---
 
-### 2. Missing issue detections in analyze_pdf()
+### 2. Add "happy with results?" decision screen after OCR (do this second)
+After OCR completes and the preview is shown, ask the user:
+
+> "Are you happy with this result?"
+
+Three choices:
+1. **Yes, let's keep going** — proceed directly to the accessibility issue list.
+   No download needed. The converted file is already in session state and will
+   be offered as a download at the very end of the session.
+2. **I want to download and review it first** — show DOCX/PDF download buttons,
+   then ask: continue to analysis or stop for now?
+3. **No, I want to stop** — goodbye screen.
+
+Key design note: downloading is NEVER a gate to continuing. Faculty who trust
+the preview can skip straight to analysis. The download is always available at
+the end of the session via the existing render_choose_format() screen.
+
+Currently the ocr_format_select screen shows downloads first, then asks about
+continuing. This needs to be restructured so the decision comes first.
+
+---
+
+### 3. Missing issue detections in analyze_pdf()
 These issues are defined in CLAUDE.md but analyze_pdf() does not check for
 them yet. All checks need to be added to the analyze_pdf() function.
 

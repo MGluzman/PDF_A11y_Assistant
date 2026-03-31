@@ -1584,14 +1584,27 @@ def render_upload():
     )
     st.divider()
 
+    # Copyright acknowledgment — must be checked before a file can be uploaded.
+    copyright_acknowledged = st.checkbox(
+        "I acknowledge that the file I am uploading is my own work or that I have "
+        "the right to use it, and that I take full responsibility for ensuring it "
+        "is free from copyright restrictions. This tool assumes all uploaded materials "
+        "are used legitimately and bears no responsibility for copyright infringement.",
+        key="copyright_ack",
+    )
+
     uploaded_file = st.file_uploader(
         label="Choose a PDF file to check",
         type=["pdf"],
         help="Upload the course PDF you want to review for accessibility issues.",
         key="pdf_uploader",
+        disabled=not copyright_acknowledged,
     )
 
-    if uploaded_file is not None:
+    if not copyright_acknowledged:
+        st.caption("Please check the box above to enable file upload.")
+
+    if uploaded_file is not None and copyright_acknowledged:
         # Store the file name and raw bytes in session state so we can
         # access them in later steps even after Streamlit re-renders.
         # working_pdf_bytes starts as an exact copy of the original and is
