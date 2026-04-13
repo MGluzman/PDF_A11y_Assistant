@@ -22,6 +22,8 @@
 # =============================================================================
 
 import io                    # In-memory byte streams for building files without writing to disk
+import os                    # File system operations — used for temp file cleanup in Docling helper
+import tempfile              # Creates temporary files that Docling's converter can read by path
 import time                  # Used for brief delays during state transitions
 from collections import Counter  # Frequency counting for font-size heuristics
 import fitz                  # PyMuPDF — opens PDFs, renders pages as images, checks password
@@ -36,6 +38,8 @@ from reportlab.lib.pagesizes import letter  # ReportLab — builds PDF output fi
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
+from docling.document_converter import DocumentConverter  # Docling — ML-powered document structure analysis
+from docling_core.types.doc import DocItemLabel           # Semantic element type labels (heading, list, table, etc.)
 
 
 # -----------------------------------------------------------------------------
@@ -606,6 +610,255 @@ def preprocess_pages(file_bytes, tesseract_path):
 # so the faculty member can see what they're describing.
 # =============================================================================
 
+def auto_classify_image(img_bytes, bbox, page_rect):
+    """
+    Automatically classify a PDF image as background, edge_artifact, artifact,
+    or content using pixel statistics and geometry.
+
+    This runs when the faculty member enters the alt text workflow — not during
+    the initial analyze_pdf() call — so it never slows down the analysis step.
+
+    Detection strategy:
+      - Background: large coverage of the page + low color variance (few distinct
+        colors). Common for scanned pages with a uniform paper color wash.
+      - Edge artifact: thin strip near a page edge (dark border from book spine,
+        page curl, or scanner shadow). Identified by extreme aspect ratio + proximity
+        to page boundary, or by high darkness near an edge.
+      - Artifact: small, very dark region anywhere on the page (smudge, speck).
+      - Content: everything else — needs human review.
+
+    Parameters:
+        img_bytes (bytes): Raw extracted image bytes.
+        bbox (fitz.Rect): Image bounding box in PDF point space.
+        page_rect (fitz.Rect): Full page dimensions in PDF point space.
+
+    Returns:
+        dict with keys:
+            classification — "background" | "edge_artifact" | "artifact" | "content"
+            confidence     — float 0.0–1.0 (>= 0.75 = high-confidence, shown in bulk review)
+            reason         — human-readable string shown in the UI
+    """
+    import numpy as np
+
+    try:
+        img  = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        arr  = np.array(img, dtype=float)
+
+        # --- Pixel statistics ---
+        # color_std: mean standard deviation across R, G, B channels.
+        # Low value = image is mostly one colour (solid wash or near-solid background).
+        color_std       = float(arr.std(axis=(0, 1)).mean())
+        mean_brightness = float(arr.mean())
+
+        # --- Geometric analysis ---
+        page_w   = page_rect.width  or 1
+        page_h   = page_rect.height or 1
+        img_w    = bbox.width       or 0
+        img_h    = bbox.height      or 0
+        coverage = (img_w * img_h) / (page_w * page_h)
+        aspect   = (img_w / img_h) if img_h > 0 else 0
+
+        # near_edge: True if the bbox is within 5% of any page border.
+        margin      = 0.05
+        near_left   = bbox.x0 < page_w * margin
+        near_right  = bbox.x1 > page_w * (1 - margin)
+        near_top    = bbox.y0 < page_h * margin
+        near_bottom = bbox.y1 > page_h * (1 - margin)
+        near_edge   = near_left or near_right or near_top or near_bottom
+
+        # --- Classification rules (first match wins) ---
+
+        # Background: large coverage + low colour variance.
+        # coverage bonus lifts confidence for images that dominate the page.
+        if coverage > 0.40 and color_std < 30:
+            confidence = min(0.95, 0.55 + (coverage - 0.40) + (30 - color_std) / 60)
+            return {
+                "classification": "background",
+                "confidence": round(confidence, 2),
+                "reason": (
+                    f"Covers {coverage:.0%} of the page with very uniform colour "
+                    f"(variation score {color_std:.1f}/255 — likely a paper background wash)."
+                ),
+            }
+
+        # Edge artifact: thin strip right at a page border.
+        thin = aspect > 8 or (aspect < 0.125 and aspect > 0)
+        if near_edge and thin:
+            return {
+                "classification": "edge_artifact",
+                "confidence": 0.85,
+                "reason": (
+                    f"Thin strip near the page edge "
+                    f"(aspect ratio {max(aspect, 1/aspect if aspect else 1):.1f}:1) — "
+                    "likely a scanner shadow or book-spine border."
+                ),
+            }
+
+        # Dark edge artifact: near a page edge and very dark (spine shadow, etc.).
+        if near_edge and mean_brightness < 60:
+            return {
+                "classification": "edge_artifact",
+                "confidence": 0.80,
+                "reason": (
+                    f"Dark region (brightness {mean_brightness:.0f}/255) near the page edge — "
+                    "likely a scan shadow or dark border."
+                ),
+            }
+
+        # Small dark artifact anywhere on the page (smudge, speck).
+        if mean_brightness < 40 and coverage < 0.10:
+            return {
+                "classification": "artifact",
+                "confidence": 0.70,
+                "reason": (
+                    f"Small ({coverage:.1%} of page), very dark image "
+                    f"(brightness {mean_brightness:.0f}/255) — likely a scan smudge or mark."
+                ),
+            }
+
+        # Default: needs human review.
+        return {
+            "classification": "content",
+            "confidence": 0.50,
+            "reason": "No clear artifact pattern detected — please review manually.",
+        }
+
+    except Exception as exc:
+        return {
+            "classification": "content",
+            "confidence": 0.50,
+            "reason": f"Classification could not run ({exc}).",
+        }
+
+
+def run_auto_classification(images, pdf_bytes):
+    """
+    Run auto_classify_image() on every image in the list and return a dict
+    mapping xref → classification result.
+
+    Requires the image's bounding box on its page, which we get from
+    page.get_image_rects(xref). If no rect is found for an xref we fall back
+    to a zero-area bbox so pixel stats still run but geometry checks all fail
+    safely (defaulting to "content").
+
+    Parameters:
+        images (list[dict]): Each dict has "xref" and "page" (1-based).
+        pdf_bytes (bytes): Current working copy of the PDF.
+
+    Returns:
+        dict: {xref (int): classification_result (dict)}
+    """
+    results = {}
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for img_meta in images:
+            xref     = img_meta["xref"]
+            page_idx = img_meta["page"] - 1  # convert to 0-based
+            try:
+                page      = doc[page_idx]
+                page_rect = page.rect
+                rects     = page.get_image_rects(xref)
+                bbox      = rects[0] if rects else fitz.Rect(0, 0, 0, 0)
+
+                img_bytes_raw, _ = None, None
+                img_info = doc.extract_image(xref)
+                if img_info:
+                    img_bytes_raw = img_info["image"]
+
+                if img_bytes_raw:
+                    results[xref] = auto_classify_image(img_bytes_raw, bbox, page_rect)
+                else:
+                    results[xref] = {
+                        "classification": "content",
+                        "confidence": 0.50,
+                        "reason": "Image data could not be extracted for classification.",
+                    }
+            except Exception:
+                results[xref] = {
+                    "classification": "content",
+                    "confidence": 0.50,
+                    "reason": "Classification failed for this image.",
+                }
+        doc.close()
+    except Exception:
+        pass
+    return results
+
+
+def render_page_with_image_highlight(pdf_bytes, page_num, xref):
+    """
+    Render a full PDF page and draw a thick red border around a specific image.
+
+    This gives faculty the page-context view: they can see exactly which image
+    on the page they are being asked to describe, even when a page contains
+    multiple images or the extracted image alone is ambiguous.
+
+    Approach:
+      1. Render the page at 150 DPI (good enough for context, fast enough to
+         not slow down the per-image workflow noticeably).
+      2. Use page.get_image_rects(xref) to find where the image sits on the page.
+      3. Scale the bounding box from PDF points to pixel coordinates.
+      4. Draw a thick red rectangle on the rendered pixmap using Pillow's
+         ImageDraw — this keeps the dependency on libraries we already have
+         and avoids needing to modify the PDF document itself.
+
+    Parameters:
+        pdf_bytes (bytes): The current working copy of the PDF.
+        page_num (int): 0-based page index where the image appears.
+        xref (int): The cross-reference number of the image to highlight.
+
+    Returns:
+        bytes: PNG image bytes of the highlighted page, or None on failure.
+               Callers should fall back to the plain extracted image if None.
+    """
+    try:
+        from PIL import ImageDraw
+
+        doc  = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = doc[page_num]
+
+        # Get the bounding box of this image on the page.
+        # get_image_rects() returns a list of fitz.Rect objects — one per
+        # location where this xref appears on the page.
+        rects = page.get_image_rects(xref)
+
+        # Render the page at 150 DPI.
+        # 150/72 ≈ 2.08 — a good balance between clarity and speed.
+        dpi   = 150
+        scale = dpi / 72
+        mat   = fitz.Matrix(scale, scale)
+        pix   = page.get_pixmap(matrix=mat)
+        doc.close()
+
+        # Convert pixmap to a Pillow Image for drawing.
+        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+
+        if rects:
+            draw = ImageDraw.Draw(img)
+            for rect in rects:
+                # Scale bounding box from PDF point space to pixel space.
+                x0 = int(rect.x0 * scale)
+                y0 = int(rect.y0 * scale)
+                x1 = int(rect.x1 * scale)
+                y1 = int(rect.y1 * scale)
+
+                # Draw a thick red border (4px outline).
+                # We draw four nested rectangles to approximate stroke width,
+                # since Pillow's rectangle outline doesn't support line width.
+                for offset in range(4):
+                    draw.rectangle(
+                        [x0 - offset, y0 - offset, x1 + offset, y1 + offset],
+                        outline=(220, 38, 38),  # Tailwind red-600 — clearly visible
+                    )
+
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+
+    except Exception:
+        return None
+
+
 def extract_image_from_pdf(pdf_bytes, xref):
     """
     Extract a single image from a PDF by its cross-reference number (xref).
@@ -1087,6 +1340,52 @@ FIX_DISPATCH = {
 }
 
 
+def _run_docling(file_bytes):
+    """
+    Run Docling document conversion on raw PDF bytes.
+
+    Docling uses ML models (downloaded once and cached in ~/.cache/huggingface)
+    to understand document structure at a semantic level — it identifies headings,
+    paragraphs, list items, tables, images, and reading order across complex page
+    layouts. This gives us richer data than PyMuPDF's font-size heuristics alone.
+
+    Why a temp file? Docling's DocumentConverter expects a file path, not bytes.
+    We write to a named temp file, convert, then delete it in the finally block
+    so the file is always cleaned up even if conversion raises an exception.
+
+    Parameters:
+        file_bytes (bytes): Raw PDF bytes.
+
+    Returns:
+        DoclingDocument object if conversion succeeds, or None on any failure.
+        Callers should treat None as "Docling unavailable — fall back to PyMuPDF."
+    """
+    tmp_path = None
+    try:
+        # Write the PDF bytes to a temporary file so Docling can open it by path.
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
+        # DocumentConverter is Docling's main entry point.
+        # By default it uses its own layout model for digital PDFs.
+        # For scanned PDFs it would need an OCR backend — but we only call
+        # this function on digital PDFs (after the scanned gate check passes).
+        converter = DocumentConverter()
+        result = converter.convert(tmp_path)
+        return result.document
+
+    except Exception:
+        # Docling can fail on malformed PDFs, unsupported features, or model
+        # errors. We return None silently and let the caller degrade gracefully.
+        return None
+
+    finally:
+        # Always remove the temp file — even if an exception was raised above.
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
 def analyze_pdf(file_bytes):
     """
     Analyze a PDF file and return a result dict describing what was found.
@@ -1133,6 +1432,21 @@ def analyze_pdf(file_bytes):
 
         page_count = len(doc)
         metadata = doc.metadata or {}
+
+        # --- DOCLING ANALYSIS ---
+        # Run Docling on the digital PDF to extract semantic structure — element
+        # types (heading, list, table, image), reading order, and layout data.
+        # This supplements PyMuPDF's lower-level block/span extraction.
+        #
+        # We run it here (after gate checks) so:
+        #   1. We know the PDF is digital and readable (not scanned, not encrypted).
+        #   2. The result is available for all subsequent content checks below.
+        #   3. build_docx_from_pdf() can use it via session_state.docling_doc
+        #      without re-running the (slow) conversion a second time.
+        #
+        # If Docling fails, docling_doc is None and all downstream code falls
+        # back to PyMuPDF — no disruption to the user.
+        docling_doc = _run_docling(file_bytes)
 
         # --- CONTENT CHECK: Missing document title (Green) ---
         # PyMuPDF exposes the Info dict as doc.metadata with a "title" key.
@@ -1359,9 +1673,9 @@ def analyze_pdf(file_bytes):
         return {"status": "issues_found", "issues": DEMO_ISSUES}
 
     if not issues:
-        return {"status": "no_issues", "issues": []}
+        return {"status": "no_issues", "issues": [], "docling_doc": docling_doc}
 
-    return {"status": "issues_found", "issues": issues}
+    return {"status": "issues_found", "issues": issues, "docling_doc": docling_doc}
 
 
 # =============================================================================
@@ -1383,6 +1697,14 @@ def build_docx_from_pdf(pdf_bytes):
     """
     Extract text and structure from a PDF and produce a structured DOCX.
 
+    Uses Docling as the primary path when a cached DoclingDocument is available
+    in session state. Docling's ML-based element labels (TITLE, SECTION_HEADER,
+    LIST_ITEM, TABLE, PICTURE) map cleanly to DOCX styles and give much better
+    heading and list detection than the font-size heuristic alone.
+
+    Falls back to the PyMuPDF font-size heuristic if Docling is unavailable
+    (e.g., the PDF was an OCR output generated mid-session, or Docling failed).
+
     Parameters:
         pdf_bytes (bytes): The working copy of the PDF (with metadata fixes applied).
 
@@ -1391,10 +1713,117 @@ def build_docx_from_pdf(pdf_bytes):
     """
     doc_out = DocxDocument()
 
+    # ------------------------------------------------------------------
+    # PRIMARY PATH: Use the cached Docling document from session state.
+    # The DoclingDocument was produced by _run_docling() during analyze_pdf()
+    # and stored in st.session_state.docling_doc by render_analyzing().
+    # ------------------------------------------------------------------
+    docling_doc = st.session_state.get("docling_doc")
+
+    if docling_doc is not None:
+        try:
+            # Build exclusion data from alt_text_results so we can skip artifact/
+            # background images in the output.
+            #
+            # Docling PICTURE items don't carry xrefs, so we can't match 1-to-1.
+            # Instead we exclude pages where EVERY image has been marked for removal.
+            # Pages with at least one non-removed image still get placeholders for
+            # all their pictures (we can't tell which Docling item maps to which xref).
+            alt_results   = st.session_state.get("alt_text_results", {})
+            alt_images    = st.session_state.get("alt_text_images", [])
+            REMOVED_TYPES = {"artifact", "background", "edge_artifact"}
+
+            # Group xrefs by page (1-based page numbers from fix_data).
+            xrefs_by_page: dict[int, set] = {}
+            for img_meta in alt_images:
+                xrefs_by_page.setdefault(img_meta["page"], set()).add(img_meta["xref"])
+
+            # A page is fully excluded only if every xref on it is marked for removal.
+            fully_excluded_pages = {
+                pg for pg, xrefs in xrefs_by_page.items()
+                if all(alt_results.get(x, {}).get("type") in REMOVED_TYPES for x in xrefs)
+            }
+
+            # iterate_items() walks the document in reading order and yields
+            # (item, level) tuples. The level is nesting depth, not heading level.
+            for item, _ in docling_doc.iterate_items():
+                if not hasattr(item, "label"):
+                    continue
+
+                label = item.label
+                text = getattr(item, "text", "").strip()
+
+                if label == DocItemLabel.TITLE:
+                    # Document title — Heading 1 in Word (most prominent)
+                    doc_out.add_heading(text, level=1)
+
+                elif label == DocItemLabel.SECTION_HEADER:
+                    # Section heading — use Heading 2 as a safe default.
+                    # Docling doesn't always expose sub-levels, so we use 2
+                    # consistently rather than guessing a deeper hierarchy.
+                    doc_out.add_heading(text, level=2)
+
+                elif label == DocItemLabel.LIST_ITEM:
+                    # List items — map to Word's built-in List Bullet style
+                    # so they render as a proper bulleted list, not plain text.
+                    # WCAG 2.1 SC 1.3.1: structure must be programmatically determinable.
+                    if text:
+                        doc_out.add_paragraph(text, style="List Bullet")
+
+                elif label == DocItemLabel.TABLE:
+                    # Tables: export to markdown to extract cell text, then
+                    # add a plain-text note pointing faculty to the original.
+                    # Full table reconstruction in python-docx is complex and
+                    # will be addressed in a future iteration.
+                    doc_out.add_paragraph("[Table — see original PDF for layout]")
+
+                elif label == DocItemLabel.PICTURE:
+                    # Skip picture placeholders for pages where every image was
+                    # marked as an artifact or background during the alt text
+                    # workflow. Pages with mixed content (some real, some removed)
+                    # still get a placeholder — we can't tell which Docling picture
+                    # item corresponds to which xref.
+                    item_page = item.prov[0].page_no if item.prov else None
+                    if item_page in fully_excluded_pages:
+                        continue
+                    page_num = item_page or "?"
+                    doc_out.add_paragraph(f"[Image — page {page_num} of original PDF]")
+
+                elif label in (DocItemLabel.TEXT, DocItemLabel.PARAGRAPH):
+                    # Standard body text paragraph.
+                    if text:
+                        doc_out.add_paragraph(text)
+
+                else:
+                    # Catch-all: any other Docling element type we haven't explicitly
+                    # handled (e.g., FORMULA, CODE, CAPTION) gets added as plain text
+                    # so content is never silently dropped.
+                    if text:
+                        doc_out.add_paragraph(text)
+
+            out = io.BytesIO()
+            doc_out.save(out)
+            return out.getvalue()
+
+        except Exception:
+            # If the Docling path fails mid-way, fall through to the PyMuPDF
+            # fallback below rather than returning an incomplete document.
+            doc_out = DocxDocument()  # Reset to a fresh document
+
+    # ------------------------------------------------------------------
+    # FALLBACK PATH: Font-size heuristic using PyMuPDF.
+    # Used when no Docling document is cached (e.g., for OCR output PDFs
+    # generated mid-session) or when the Docling path raises an exception.
+    #
+    # Heuristic:
+    #   Most common rounded font size  = body text → Normal paragraph style
+    #   Size > 140% of body            = Heading 1
+    #   Size > 120% of body            = Heading 2
+    # ------------------------------------------------------------------
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        # Determine body text size using the same frequency approach as TOC generation.
+        # Determine body text size by finding the most frequently used font size.
         all_sizes = []
         for page in doc:
             for block in page.get_text("dict")["blocks"]:
@@ -1426,7 +1855,7 @@ def build_docx_from_pdf(pdf_bytes):
                     line_sizes = [span.get("size", body_size) for span in line.get("spans", [])]
                     avg_size = sum(line_sizes) / len(line_sizes) if line_sizes else body_size
 
-                    # Map font size to a DOCX style.
+                    # Map font size ratio to a DOCX heading level.
                     if avg_size > body_size * 1.4:
                         doc_out.add_heading(line_text, level=1)
                     elif avg_size > body_size * 1.2:
@@ -1480,6 +1909,9 @@ def init_state():
         "alt_text_index": 0,        # Index of the image currently being worked on
         "alt_text_phase": "question_1",  # Sub-step within the per-image workflow
         "alt_text_results": {},     # {xref: {type, severity, alt_text, page}} — one per image
+        "alt_text_auto_classifications": {},  # {xref: {classification, confidence, reason}}
+        "docling_doc": None,        # DoclingDocument from _run_docling() — cached here so
+                                    # build_docx_from_pdf() can use it without re-converting
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -1609,7 +2041,7 @@ def render_upload():
         # access them in later steps even after Streamlit re-renders.
         # working_pdf_bytes starts as an exact copy of the original and is
         # updated in-place as each fix is confirmed — the original is never touched.
-        st.session_state.file_name = uploaded_file.name
+        st.session_state.file_name = uploaded_file.name.strip()
         st.session_state.file_bytes = uploaded_file.read()
         st.session_state.working_pdf_bytes = st.session_state.file_bytes
         st.session_state.step = "analyzing"
@@ -1631,6 +2063,11 @@ def render_analyzing():
 
     with st.spinner(f"Analyzing **{st.session_state.file_name}** — just a moment..."):
         result = analyze_pdf(st.session_state.file_bytes)
+
+    # Cache the Docling document in session state so build_docx_from_pdf()
+    # can use it later without re-running the (slow) ML conversion.
+    # If Docling failed, this will be None — all downstream code handles that.
+    st.session_state.docling_doc = result.get("docling_doc")
 
     # Route to the correct next step based on what was found.
     if result["status"] == "password_protected":
@@ -2471,8 +2908,9 @@ def render_issue_list():
                     # so the sub-steps always start fresh.
                     st.session_state.alt_text_images = issue.get("fix_data", {}).get("images", [])
                     st.session_state.alt_text_index = 0
-                    st.session_state.alt_text_phase = "question_1"
+                    st.session_state.alt_text_phase = "classifying"  # auto-classify first
                     st.session_state.alt_text_results = {}
+                    st.session_state.alt_text_auto_classifications = {}
                     st.session_state.step = "image_alt_text"
                 else:
                     st.session_state.step = "resolving_issue"
@@ -2494,16 +2932,110 @@ def render_issue_list():
 # "Images with missing text descriptions" issue from the issue list.
 #
 # Sub-phases (stored in st.session_state.alt_text_phase):
-#   question_1  — Is this image purely decorative?
-#   question_2  — Is it critical to understanding? (only if not decorative)
-#   enter_text  — Enter or edit the alt text description
-#   summary     — Review all decisions before confirming
+#   classifying  — runs auto_classify_image() on all images (transient spinner)
+#   bulk_review  — shows high-confidence detections for one-click bulk removal
+#   question_1   — three-option choice: decorative / artifact / informational
+#   question_2   — critical or supplementary? (only if informational)
+#   enter_text   — enter or edit the alt text description
+#   summary      — review all decisions before confirming
 #
 # Per CLAUDE.md Image Remediation Workflow:
-#   Decorative                → Green, empty alt text, no description needed
-#   Not decorative, critical  → stays Red, full description required
+#   Background / Edge artifact  → Green, excluded from DOCX output
+#   Decorative                  → Green, empty alt text, no description needed
+#   Not decorative, critical    → stays Red, full description required
 #   Not decorative, not critical → Yellow, brief description required
 # =============================================================================
+
+def _render_abandon_button():
+    """
+    Render the global "✕ Abandon current process" escape button.
+
+    Shown at the bottom of every remediation and human-in-the-loop screen.
+    Clicking it discards whatever is currently in progress (any uncommitted
+    decision for the current issue/image) and returns to the issue list,
+    which is always the last completed summary state.
+
+    Completed work is never lost — resolved_ids and applied fixes remain in
+    session state. Only the in-progress interaction is abandoned.
+    """
+    st.divider()
+    if st.button(
+        "✕ Abandon current process",
+        use_container_width=False,
+        key=f"abandon_{st.session_state.get('step', 'unknown')}_{st.session_state.get('alt_text_index', 0)}",
+        help="Stop what you're doing and return to the issue list. Completed fixes are kept.",
+    ):
+        # Clear any in-progress issue state so the issue list starts clean.
+        st.session_state.current_issue_id = None
+        st.session_state.proposed_fix     = None
+        st.session_state.step             = "issue_list"
+        st.rerun()
+
+
+def _render_image_nav_buttons(index, total, xref, current, results):
+    """
+    Render the three navigation buttons shown at the bottom of every per-image
+    phase: Previous, Skip, and Stop.
+
+    - Previous: goes back to the preceding image and clears any partial result
+      recorded for the current image, so the faculty member can re-answer.
+      Hidden on the first image.
+    - Skip: records the image as skipped (no decision made) and advances.
+      Skipped images appear in the summary so faculty can revisit them.
+    - Stop: jumps straight to the summary screen regardless of how many images
+      remain. Any unclassified images will be visible there.
+
+    Parameters:
+        index   (int): 0-based index of the current image.
+        total   (int): Total number of images in the workflow.
+        xref    (int): xref of the current image (used to clear partial results).
+        current (dict): The current image's metadata dict.
+        results (dict): The live alt_text_results dict from session state.
+    """
+    st.divider()
+    nav_cols = st.columns(3)
+
+    with nav_cols[0]:
+        # Previous — hidden for the first image (nowhere to go back to).
+        if index > 0:
+            if st.button(
+                "← Previous image",
+                use_container_width=True,
+                key=f"nav_prev_{index}",
+            ):
+                # Clear any partial answer for the current image so it starts
+                # fresh when the faculty member returns to it.
+                results.pop(xref, None)
+                st.session_state.alt_text_results = results
+                st.session_state.alt_text_index = index - 1
+                st.session_state.alt_text_phase = "question_1"
+                st.rerun()
+
+    with nav_cols[1]:
+        if st.button(
+            "Skip this image →",
+            use_container_width=True,
+            key=f"nav_skip_{index}",
+        ):
+            # Record as skipped so the summary can flag it.
+            results[xref] = {
+                "type": "skipped",
+                "severity": "green",
+                "alt_text": "",
+                "page": current["page"],
+            }
+            st.session_state.alt_text_results = results
+            _advance_alt_text_image()
+
+    with nav_cols[2]:
+        if st.button(
+            "Skip fixing images",
+            use_container_width=True,
+            key=f"nav_stop_{index}",
+        ):
+            st.session_state.alt_text_phase = "summary"
+            st.rerun()
+
 
 def _advance_alt_text_image():
     """
@@ -2534,24 +3066,207 @@ def render_image_alt_text():
     st.title("♿ PDF Assistant")
     st.divider()
 
-    images = st.session_state.alt_text_images
-    index  = st.session_state.alt_text_index
-    phase  = st.session_state.alt_text_phase
-    total  = len(images)
+    images  = st.session_state.alt_text_images
+    index   = st.session_state.alt_text_index
+    phase   = st.session_state.alt_text_phase
+    total   = len(images)
     results = st.session_state.alt_text_results
+    auto_classifications = st.session_state.get("alt_text_auto_classifications", {})
+
+    HIGH_CONFIDENCE = 0.75  # threshold for bulk review inclusion
+
+    # -------------------------------------------------------------------------
+    # CLASSIFYING PHASE — run auto-classification on all images (transient)
+    # -------------------------------------------------------------------------
+    if phase == "classifying":
+        pdf_source = st.session_state.working_pdf_bytes or st.session_state.file_bytes
+        with st.spinner(
+            f"Reviewing {total} image{'s' if total != 1 else ''} — "
+            "checking for backgrounds and scan artifacts..."
+        ):
+            classifications = run_auto_classification(images, pdf_source)
+        st.session_state.alt_text_auto_classifications = classifications
+
+        # Decide next phase: bulk_review if any high-confidence non-content detections
+        # exist, otherwise go straight to per-image question_1.
+        flagged = [
+            xref for xref, r in classifications.items()
+            if r["classification"] != "content" and r["confidence"] >= HIGH_CONFIDENCE
+        ]
+        if flagged:
+            st.session_state.alt_text_phase = "bulk_review"
+        else:
+            st.session_state.alt_text_phase = "question_1"
+        st.rerun()
+        return
+
+    # -------------------------------------------------------------------------
+    # BULK REVIEW PHASE — one-click removal of high-confidence detections
+    # -------------------------------------------------------------------------
+    if phase == "bulk_review":
+        flagged_images = [
+            img for img in images
+            if auto_classifications.get(img["xref"], {}).get("classification") != "content"
+            and auto_classifications.get(img["xref"], {}).get("confidence", 0) >= HIGH_CONFIDENCE
+        ]
+
+        n = len(flagged_images)
+        bg_count  = sum(1 for img in flagged_images
+                        if auto_classifications[img["xref"]]["classification"] == "background")
+        ea_count  = sum(1 for img in flagged_images
+                        if auto_classifications[img["xref"]]["classification"] == "edge_artifact")
+        art_count = sum(1 for img in flagged_images
+                        if auto_classifications[img["xref"]]["classification"] == "artifact")
+
+        # Build a plain-language summary of what was found.
+        found_parts = []
+        if bg_count:
+            found_parts.append(f"{bg_count} page background{'s' if bg_count != 1 else ''}")
+        if ea_count:
+            found_parts.append(f"{ea_count} edge artifact{'s' if ea_count != 1 else ''}")
+        if art_count:
+            found_parts.append(f"{art_count} scan artifact{'s' if art_count != 1 else ''}")
+
+        st.markdown("### I reviewed your images automatically")
+        st.info(
+            f"I found **{', '.join(found_parts)}** that look like they should be removed "
+            f"rather than described. Here's what I spotted:"
+        )
+
+        pdf_source = st.session_state.working_pdf_bytes or st.session_state.file_bytes
+
+        # Show thumbnails of flagged images in a 3-column grid.
+        cols = st.columns(3)
+        for i, img_meta in enumerate(flagged_images):
+            xref        = img_meta["xref"]
+            clf         = auto_classifications[xref]
+            label_map   = {
+                "background":   "Page background",
+                "edge_artifact": "Edge artifact",
+                "artifact":     "Scan artifact",
+            }
+            label = label_map.get(clf["classification"], clf["classification"])
+            with cols[i % 3]:
+                img_bytes, _ = extract_image_from_pdf(pdf_source, xref)
+                if img_bytes:
+                    st.image(img_bytes, use_container_width=True)
+                st.caption(f"**{label}** — page {img_meta['page']}")
+                st.caption(clf["reason"])
+
+        st.divider()
+        st.markdown("**What would you like to do?**")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                f"Remove all {n} flagged items",
+                type="primary",
+                use_container_width=True,
+                key="bulk_remove_all",
+            ):
+                # Apply removal to all flagged images in alt_text_results.
+                for img_meta in flagged_images:
+                    xref = img_meta["xref"]
+                    clf  = auto_classifications[xref]
+                    # background and edge_artifact both stored as "artifact" type
+                    # so build_docx_from_pdf skips them consistently.
+                    results[xref] = {
+                        "type": clf["classification"],  # "background", "edge_artifact", or "artifact"
+                        "severity": "green",
+                        "alt_text": "",
+                        "page": img_meta["page"],
+                    }
+                st.session_state.alt_text_results = results
+                # Advance to first unclassified image, or summary if all done.
+                first_idx = next(
+                    (i for i, img in enumerate(images) if img["xref"] not in results),
+                    None,
+                )
+                if first_idx is not None:
+                    st.session_state.alt_text_index = first_idx
+                    st.session_state.alt_text_phase = "question_1"
+                else:
+                    st.session_state.alt_text_phase = "summary"
+                st.rerun()
+
+        with col2:
+            if st.button(
+                "Let me review each one individually",
+                use_container_width=True,
+                key="bulk_review_each",
+            ):
+                # Don't apply anything — go through normal flow.
+                # Auto-classification badges will still appear as suggestions.
+                st.session_state.alt_text_phase = "question_1"
+                st.rerun()
+
+        _render_abandon_button()
+        return
 
     # -------------------------------------------------------------------------
     # SUMMARY PHASE — shown after all images have been processed
     # -------------------------------------------------------------------------
     if phase == "summary":
-        st.markdown("### Review your image descriptions")
+        st.markdown("### Review your image decisions")
         st.markdown(
-            "Here's what we have for each image. Confirm to save all descriptions, "
+            "Here's what we have for each image. Confirm to apply all decisions, "
             "or go back to make changes."
         )
         st.divider()
 
-        for img in images:
+        # Partition images into four groups for the summary.
+        REMOVED_TYPES = ("artifact", "background", "edge_artifact")
+        removed      = [img for img in images if results.get(img["xref"], {}).get("type") in REMOVED_TYPES]
+        skipped      = [img for img in images if results.get(img["xref"], {}).get("type") == "skipped"
+                        or img["xref"] not in results]
+        others       = [img for img in images if results.get(img["xref"], {}).get("type")
+                        not in REMOVED_TYPES and results.get(img["xref"], {}).get("type") not in (None, "skipped")]
+
+        if removed:
+            type_label_map = {
+                "artifact":      "Scan artifact",
+                "background":    "Page background",
+                "edge_artifact": "Edge artifact",
+            }
+            st.warning(
+                f"**{len(removed)} image{'s' if len(removed) != 1 else ''} will be "
+                "excluded from the accessible output.**"
+            )
+            for img in removed:
+                xref    = img["xref"]
+                pg      = results.get(xref, {}).get("page", img.get("page", "?"))
+                kind    = results.get(xref, {}).get("type", "artifact")
+                label   = type_label_map.get(kind, "Removed image")
+                with st.expander(f"Page {pg} — {label} (will be excluded)", expanded=False):
+                    img_bytes, _ = extract_image_from_pdf(
+                        st.session_state.working_pdf_bytes or st.session_state.file_bytes,
+                        xref,
+                    )
+                    if img_bytes:
+                        st.image(img_bytes, width=300)
+                    st.info("This image will be excluded from the Word document output.")
+            st.divider()
+
+        if skipped:
+            st.error(
+                f"**{len(skipped)} image{'s' if len(skipped) != 1 else ''} "
+                f"{'were' if len(skipped) != 1 else 'was'} skipped or not reviewed.** "
+                "You can confirm anyway or go back to classify them."
+            )
+            for img in skipped:
+                xref = img["xref"]
+                pg   = img.get("page", "?")
+                with st.expander(f"Page {pg} — Not classified", expanded=False):
+                    img_bytes, _ = extract_image_from_pdf(
+                        st.session_state.working_pdf_bytes or st.session_state.file_bytes,
+                        xref,
+                    )
+                    if img_bytes:
+                        st.image(img_bytes, width=300)
+                    st.caption("No decision was made for this image.")
+            st.divider()
+
+        for img in others:
             xref   = img["xref"]
             result = results.get(xref, {})
             pg     = result.get("page", img.get("page", "?"))
@@ -2612,6 +3327,7 @@ def render_image_alt_text():
                 st.session_state.alt_text_index = 0
                 st.session_state.alt_text_phase = "question_1"
                 st.rerun()
+        _render_abandon_button()
         return
 
     # -------------------------------------------------------------------------
@@ -2623,51 +3339,84 @@ def render_image_alt_text():
         return
 
     # -------------------------------------------------------------------------
-    # PER-IMAGE HEADER — progress indicator and image preview
+    # PER-IMAGE HEADER — progress indicator and image previews
     # -------------------------------------------------------------------------
-    current = images[index]
-    xref    = current["xref"]
+    current  = images[index]
+    xref     = current["xref"]
+    page_num = current["page"] - 1  # convert 1-based page number to 0-based index
 
     st.markdown(f"**Image {index + 1} of {total}** — found on page {current['page']}")
     st.progress(index / total)
     st.divider()
 
-    # Extract and display the image from the working copy of the PDF.
-    img_bytes, _ = extract_image_from_pdf(
-        st.session_state.working_pdf_bytes or st.session_state.file_bytes,
-        xref,
-    )
+    pdf_source = st.session_state.working_pdf_bytes or st.session_state.file_bytes
+
+    # --- Panel 1: Page context view with red highlight ---
+    # Shows the full page so faculty can see exactly which image is being assessed.
+    # Critical when a page has multiple images or when the extracted crop is ambiguous.
+    page_view = render_page_with_image_highlight(pdf_source, page_num, xref)
+    if page_view:
+        st.caption("📍 The image being assessed is highlighted in red:")
+        st.image(page_view, use_container_width=True)
+    st.divider()
+
+    # --- Panel 2: Extracted image at fixed width ---
+    # Clean crop of the image alone — easier to read the content in detail.
+    img_bytes, _ = extract_image_from_pdf(pdf_source, xref)
     if img_bytes:
-        # Constrain width to avoid very wide images dominating the screen.
+        st.caption("🖼 Extracted image:")
         st.image(img_bytes, width=500)
-    else:
+
+        # --- Panel 3: Full-size zoom (collapsed by default) ---
+        with st.expander("🔍 View full size", expanded=False):
+            st.image(img_bytes, use_container_width=True)
+    elif not page_view:
+        # Both views unavailable — show a fallback message.
         st.caption("_(Image preview unavailable for this item)_")
 
     st.divider()
 
     # -------------------------------------------------------------------------
-    # QUESTION 1 — Is this image purely decorative?
-    # Per CLAUDE.md: verbatim question with example types.
+    # QUESTION 1 — Classify the image: decorative, artifact, or informational?
+    # Per CLAUDE.md: three options. Show auto-classification badge if available.
     # -------------------------------------------------------------------------
     if phase == "question_1":
-        st.markdown("### Is this image purely decorative?")
-        st.markdown(
-            "A decorative image exists only for visual appeal — it doesn't convey "
-            "information your students need to understand the content. Examples: "
-            "a decorative border, a background texture, or a generic stock photo "
-            "that has no connection to the topic."
-        )
+        # Auto-classification suggestion badge — shown when confidence is below
+        # the HIGH_CONFIDENCE threshold (those were handled in bulk_review) but
+        # still meaningfully non-"content". We show all non-content suggestions here.
+        clf = auto_classifications.get(xref, {})
+        if clf.get("classification") and clf["classification"] != "content":
+            label_map = {
+                "background":    "a page background",
+                "edge_artifact": "a scan edge artifact",
+                "artifact":      "a scan artifact",
+            }
+            suggestion = label_map.get(clf["classification"], clf["classification"])
+            conf_pct   = int(clf.get("confidence", 0) * 100)
+            st.warning(
+                f"⚠️ **I think this might be {suggestion}** ({conf_pct}% confidence). "
+                f"Reason: {clf.get('reason', '')}  \n"
+                "You can accept my suggestion by choosing the matching option below, "
+                "or override it if I got it wrong."
+            )
 
-        col1, col2 = st.columns(2)
+        st.markdown("### What is this image?")
+
+        col1, col2, col3 = st.columns(3)
+
         with col1:
+            st.markdown("**Decorative**")
+            st.caption(
+                "Exists only for visual appeal — a border, texture, or stock photo "
+                "with no connection to the topic. No description needed."
+            )
             if st.button(
-                "Yes, it's decorative.",
+                "It's decorative",
                 type="primary",
                 use_container_width=True,
-                key=f"q1_yes_{index}",
+                key=f"q1_decorative_{index}",
             ):
-                # Decorative → Green, empty alt text.
-                # Per CLAUDE.md: mark automatically, no further review needed.
+                # Decorative → Green, empty alt text. No further review needed.
                 results[xref] = {
                     "type": "decorative",
                     "severity": "green",
@@ -2678,13 +3427,42 @@ def render_image_alt_text():
                 _advance_alt_text_image()
 
         with col2:
+            st.markdown("**Scan artifact**")
+            st.caption(
+                "A smudge, shadow, dark edge, or other visual noise from scanning. "
+                "Will be excluded from the accessible output."
+            )
             if st.button(
-                "No, it carries information.",
+                "It's a scan artifact — remove it",
                 use_container_width=True,
-                key=f"q1_no_{index}",
+                key=f"q1_artifact_{index}",
+            ):
+                # Artifact → Green, excluded from DOCX output.
+                # The PDF working copy is not modified — exclusion applies at build time.
+                results[xref] = {
+                    "type": "artifact",
+                    "severity": "green",
+                    "alt_text": "",
+                    "page": current["page"],
+                }
+                st.session_state.alt_text_results = results
+                _advance_alt_text_image()
+
+        with col3:
+            st.markdown("**Informational**")
+            st.caption(
+                "Carries content students need — a chart, diagram, photo, figure, "
+                "or any image that isn't purely decorative. Needs a description."
+            )
+            if st.button(
+                "It carries information",
+                use_container_width=True,
+                key=f"q1_info_{index}",
             ):
                 st.session_state.alt_text_phase = "question_2"
                 st.rerun()
+
+        _render_image_nav_buttons(index, total, xref, current, results)
 
     # -------------------------------------------------------------------------
     # QUESTION 2 — Is it critical to understanding?
@@ -2734,10 +3512,17 @@ def render_image_alt_text():
                 st.session_state.alt_text_phase = "enter_text"
                 st.rerun()
 
-        # Allow going back to Question 1 in case they change their mind.
-        if st.button("← Back", key=f"q2_back_{index}"):
+        # Back to Question 1 to change the classification entirely.
+        st.divider()
+        if st.button(
+            "← Back to classification",
+            key=f"q2_back_{index}",
+            use_container_width=False,
+        ):
             st.session_state.alt_text_phase = "question_1"
             st.rerun()
+
+        _render_image_nav_buttons(index, total, xref, current, results)
 
     # -------------------------------------------------------------------------
     # ENTER TEXT — write the alt text description
@@ -2790,12 +3575,15 @@ def render_image_alt_text():
 
         with col2:
             if st.button(
-                "← Back",
+                "← Back to question",
                 use_container_width=True,
                 key=f"alt_back_{index}",
             ):
                 st.session_state.alt_text_phase = "question_2"
                 st.rerun()
+
+        _render_image_nav_buttons(index, total, xref, current, results)
+        _render_abandon_button()
 
 
 # -----------------------------------------------------------------------------
@@ -2845,6 +3633,8 @@ def render_source_file_question():
             # fix screen, same as any other issue.
             st.session_state.step = "resolving_issue"
             st.rerun()
+
+    _render_abandon_button()
 
 
 # -----------------------------------------------------------------------------
@@ -2928,6 +3718,8 @@ def render_cuny_resources():
             # Proceed to the standard untagged PDF fix screen.
             st.session_state.step = "resolving_issue"
             st.rerun()
+
+    _render_abandon_button()
 
 
 # -----------------------------------------------------------------------------
@@ -3073,6 +3865,8 @@ def render_resolving_issue():
             st.session_state.step = "issue_list"
             st.rerun()
 
+    _render_abandon_button()
+
 
 # -----------------------------------------------------------------------------
 # STEP: continue_or_stop
@@ -3120,6 +3914,8 @@ def render_continue_or_stop():
         if st.button("Continue to download", type="primary"):
             st.session_state.step = "choose_format"
             st.rerun()
+
+    _render_abandon_button()
 
 
 # -----------------------------------------------------------------------------
@@ -3180,6 +3976,8 @@ def render_re_analysis():
             st.session_state.reanalysis_done = True
             st.session_state.step = "continue_or_stop"
             st.rerun()
+
+    _render_abandon_button()
 
 
 # -----------------------------------------------------------------------------
@@ -3247,6 +4045,8 @@ def render_choose_format():
             mime="application/pdf",
             use_container_width=True,
         )
+
+    _render_abandon_button()
 
 
 # -----------------------------------------------------------------------------

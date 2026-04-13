@@ -8,6 +8,80 @@ of the ADA. The tool is built with Streamlit and Python.
 
 ---
 
+## Navigation
+
+Three distinct navigation mechanisms exist. Each has a specific scope and label.
+Never mix them up.
+
+---
+
+### 1. Go Back Button — linear step navigation (NOT YET IMPLEMENTED)
+Returns the user to the immediately preceding workflow step without losing any
+progress. Intended for all non-remediation screens where the user may want to
+reverse a routing decision (e.g., went to scanned_doc screen but wants to re-upload).
+
+Rules:
+- Label: `← Go back`
+- Appears below primary action buttons on every screen except `upload` and `done`
+- Only changes `st.session_state.step` — never wipes session state
+- Use "Start Over" in the sidebar to wipe everything
+
+Step navigation map (destination for each screen's Go Back button):
+
+| Current step            | Go back destination  |
+|-------------------------|----------------------|
+| `analyzing`             | `upload`             |
+| `password_protected`    | `upload`             |
+| `password_walkthrough`  | `password_protected` |
+| `scanned_doc`           | `upload`             |
+| `scanned_goodbye`       | `scanned_doc`        |
+| `running_ocr`           | `scanned_doc`        |
+| `running_easyocr`       | `ocr_format_select`  |
+| `ocr_format_select`     | `scanned_doc`        |
+| `no_issues`             | `upload`             |
+| `issue_list`            | `upload`             |
+| `resolving_issue`       | `issue_list`         |
+| `choose_format`         | `issue_list`         |
+
+---
+
+### 2. Abandon Button — escape from remediation
+Aborts whatever remediation or human-in-the-loop process is currently in progress
+and returns the user to the issue list (the last completed summary state).
+Completed fixes are never lost — only the current in-progress interaction is discarded.
+
+Rules:
+- Label: `✕ Abandon current process`
+- Appears at the very bottom of every remediation and analysis screen, below all
+  other buttons, separated by a divider
+- On click: clears `current_issue_id` and `proposed_fix`, sets `step = "issue_list"`
+- Does NOT appear on: upload, analyzing, OCR screens, no_issues, done, issue_list
+
+Screens where Abandon is shown:
+- `image_alt_text` (all phases: classifying, bulk_review, summary, question_1/2, enter_text)
+- `source_file_question`
+- `cuny_resources`
+- `resolving_issue`
+- `continue_or_stop`
+- `re_analysis`
+- `choose_format`
+
+---
+
+### 3. Image-level navigation — within the alt text workflow only
+Three buttons appear at the bottom of every per-image phase (question_1, question_2,
+enter_text) to move between images without abandoning the whole workflow:
+
+| Button | Behavior |
+|--------|----------|
+| `← Previous image` | Returns to the preceding image, clears its partial result so it starts fresh. Hidden on image #1. |
+| `Skip this image →` | Records `type="skipped"` and advances to the next image. Skipped images appear in the summary. |
+| `Skip fixing images` | Jumps immediately to the summary screen, leaving unreviewed images unclassified. |
+
+These appear ABOVE the Abandon button, which is always the very last element.
+
+---
+
 ## Core Behavior
 
 ### Workflow Order
@@ -338,36 +412,167 @@ Defined Red Light issues:
 
 ## Image Remediation Workflow
 
-When the user chooses to address images with missing text descriptions, work through
-each image one at a time. For each image, ask the following two questions:
+When the user chooses to address images with missing text descriptions, the workflow
+runs in three stages: auto-classification, bulk review, then per-image decisions.
 
-**Question 1:**
-> "Is this image purely decorative — does it exist only for visual appeal, with no
-> informational value? For example, a decorative border, a background texture, or
-> a generic stock photo that doesn't relate to the content."
+---
 
-**Question 2:**
-> "Does understanding this image affect how your students understand the rest of
-> the document? For example, a chart, diagram, map, or figure that presents
-> information not described in the surrounding text."
+### Stage 1 — Auto-Classification (runs at workflow start, not during analyze_pdf)
 
-### Severity Reassignment Based on Answers
+Immediately when the user enters the alt text workflow, run `auto_classify_image()`
+on every detected image. This happens once, behind a spinner, before any questions
+are shown. Results are cached in `st.session_state.alt_text_auto_classifications`.
 
-| Decorative? | Critical to understanding? | Severity | Action |
-|---|---|---|---|
-| No | Yes | Stays 🔴 Red | Generate a full descriptive alt text for faculty review and approval |
-| No | No | Downgraded to 🟡 Yellow | Generate a brief contextual description for faculty review |
-| Yes | N/A | Downgraded to 🟢 Green | Mark as decorative (empty alt text) — no description needed |
+**`auto_classify_image(img_bytes, bbox, page_rect)` — detection logic:**
 
-### Alt Text Generation Rules
+Analyze two things: pixel statistics and geometry.
+
+Pixel statistics (computed with Pillow + NumPy on the extracted image):
+- `mean_brightness` — average pixel brightness (0=black, 255=white) across all channels
+- `color_std` — mean standard deviation across R, G, B channels — measures how
+  uniform the color is. Low std = mostly one color.
+
+Geometry (computed from the image's bounding box on the page):
+- `coverage` — image area divided by page area
+- `aspect` — image width / height
+- `near_edge` — True if the bounding box is within 5% of any page edge
+
+Classification rules (evaluated in order, first match wins):
+
+| Condition | Classification | Confidence |
+|-----------|---------------|------------|
+| coverage > 0.40 AND color_std < 30 | `background` | 0.55 + coverage bonus |
+| near_edge AND (aspect > 8 OR aspect < 0.125) | `edge_artifact` | 0.85 |
+| near_edge AND mean_brightness < 60 | `edge_artifact` | 0.80 |
+| mean_brightness < 40 AND coverage < 0.10 | `artifact` | 0.70 |
+| anything else | `content` | 0.50 |
+
+Store each result as:
+```
+alt_text_auto_classifications[xref] = {
+    "classification": "background" | "edge_artifact" | "artifact" | "content",
+    "confidence": float,   # 0.0–1.0
+    "reason": str,         # human-readable explanation shown in the UI
+}
+```
+
+High-confidence threshold: `>= 0.75`. Images at or above this threshold are
+pre-classified and shown in the bulk review screen. Images below it go through
+the normal per-image question flow, but with the suggestion badge shown.
+
+---
+
+### Stage 2 — Bulk Review Screen (`alt_text_phase = "bulk_review"`)
+
+Only shown if at least one image has a high-confidence auto-classification
+(confidence >= 0.75). Skip this stage entirely if all images are `content` or low-confidence.
+
+Display:
+- A summary: "I reviewed all N images. I think I found [X backgrounds] and
+  [Y scan artifacts]. You can remove them all at once, or review each one individually."
+- Thumbnail grid of the flagged images, each labeled with the classification and reason
+- Two action buttons:
+  1. **"Remove all flagged items"** — applies all high-confidence classifications as
+     `type="background"` or `type="artifact"`, `severity="green"` in `alt_text_results`,
+     then advances to the first unclassified image (or summary if all are classified)
+  2. **"Let me review each one"** — clears the auto-classifications and goes through
+     every image in the normal per-image flow (with suggestion badges)
+
+Low-confidence images are NOT shown in the bulk review — they always go through
+the per-image flow regardless of what the user chooses on this screen.
+
+---
+
+### Stage 3 — Per-Image Screen
+
+#### Image Display Panels
+
+Every per-image screen shows these panels before asking any questions:
+
+**Panel 1 — Page context view (required)**
+Render the full page at 150 DPI and draw a thick red border (4px) around the
+image's bounding box. Shows faculty exactly which item on the page is being assessed.
+
+Implementation:
+- Use `page.get_image_rects(xref)` for the bounding box
+- Draw the border post-render using Pillow `ImageDraw` — four nested 1px rectangles
+- Fall back to extracted image only if `get_image_rects()` returns nothing
+
+**Panel 2 — Extracted image (required)**
+Raw extracted image at 500px width — clean crop without surrounding page content.
+
+**Panel 3 — Full-size zoom (collapsible)**
+Collapsed expander "🔍 View full size" with `use_container_width=True`.
+
+#### Auto-Classification Badge
+
+If `auto_classify_image()` returned a non-`content` classification for this image,
+show a suggestion badge above the question buttons:
+
+> ⚠️ **I think this might be a [background / scan artifact].** Reason: [reason text].
+> You can accept the suggestion below or choose a different option.
+
+Pre-select the matching button visually (use `type="primary"` on the suggested option).
+Faculty can still choose any of the three options regardless of the suggestion.
+
+#### Question Options (three buttons, always shown)
+
+| Button | Action |
+|--------|--------|
+| **It's decorative** | `type="decorative"`, `severity="green"`, empty alt text |
+| **It's a scan artifact — remove it** | `type="artifact"`, `severity="green"`, excluded from output |
+| **It carries information** | Advance to Question 2 |
+
+#### Question 2 — Critical or supplementary?
+
+> "Does understanding this image affect how your students understand the document?
+> For example, a chart, diagram, map, or figure that presents information not
+> described in the surrounding text."
+
+| Answer | Result |
+|--------|--------|
+| Yes, critical | `type="critical"`, `severity="red"` → enter_text (full description) |
+| No, supplementary | `type="supplementary"`, `severity="yellow"` → enter_text (brief description) |
+
+---
+
+### Severity Table
+
+| Classification | Severity | Output behavior |
+|----------------|----------|-----------------|
+| Decorative | 🟢 Green | Empty alt text in output |
+| Background | 🟢 Green | Excluded from DOCX output |
+| Scan artifact / edge artifact | 🟢 Green | Excluded from DOCX output |
+| Informational + critical | 🔴 Red | Full alt text description required |
+| Informational + supplementary | 🟡 Yellow | Brief alt text description required |
+
+---
+
+### Artifact and Background Handling
+
+- Store in `alt_text_results[xref]` with `type="artifact"` or `type="background"`
+- `build_docx_from_pdf()` skips any image whose xref has type `artifact` or `background`
+- The working PDF is never modified — exclusion is output-only
+- Summary screen separates removed items from described items so faculty can confirm
+
+---
+
+### Image Display — Summary Screen
+
+Group images into three sections:
+1. **Removed** (artifacts + backgrounds) — shown with a yellow warning
+2. **Decorative** — shown with a success badge
+3. **Described** — shown with the approved alt text
+
+---
+
+### Alt Text Rules
 - For Red and Yellow images, generate a description and ask the faculty member to
-  review, edit, or approve it before it is applied — never apply alt text without
-  faculty confirmation
-- Descriptions should be concise but complete — describe what the image shows and
-  why it matters in context, not just what it looks like
-- For decorative images, apply empty alt text automatically after the faculty member
-  confirms the image is decorative — no further review needed
-- Never fabricate meaning — if the image content is unclear, describe what is visible
+  review, edit, or approve it — never apply alt text without confirmation
+- Descriptions should be concise but complete — what the image shows and why it matters
+- For decorative images, apply empty alt text automatically after confirmation
+- For artifacts/backgrounds, no description needed — just confirm removal
+- Never fabricate meaning — if image content is unclear, describe what is visible
   and flag it for the faculty member to complete
 
 ### 🟡 Yellow Light — Moderate

@@ -1,12 +1,30 @@
 # To Do Next — Agentic AI Accessibility Suite
 
-**Last updated:** 2026-03-31 — 7:10 PM
+**Last updated:** 2026-04-13
 
 ---
 
 ## PDF Assistant — Active Work
 
-### 1. Verify updated OCR scanning pipeline (Priority: do first)
+### 1. Add Go Back / Previous Step button to every screen (Priority: do first)
+Every screen in the workflow needs a way for the user to return to the previous
+step without using "Start Over" (which wipes all progress). This came up during
+OCR testing: after choosing to proceed to the issue list, there was no way to
+go back and download the readable files.
+
+The button should appear at the bottom of every render_*() screen. It must:
+- Return the user to the immediately preceding step (not always "upload")
+- Never wipe session state — only change st.session_state.step
+- Be clearly labeled "← Go back" and placed below the primary action buttons
+- Not appear on the upload screen (there is nowhere to go back to)
+- Not appear on the final "done" screen
+
+Each screen's target step must be defined explicitly — see CLAUDE.md for the
+full step-to-step navigation map.
+
+---
+
+### 2. Verify updated OCR scanning pipeline (Priority: do second)
 The OCR flow was significantly reworked in the last session. Needs end-to-end
 testing with a real scanned PDF before moving on to anything else.
 
@@ -26,7 +44,7 @@ Checklist:
 
 ---
 
-### 2. Add "happy with results?" decision screen after OCR (do this second)
+### 3. Add "happy with results?" decision screen after OCR (do this third)
 After OCR completes and the preview is shown, ask the user:
 
 > "Are you happy with this result?"
@@ -48,7 +66,7 @@ continuing. This needs to be restructured so the decision comes first.
 
 ---
 
-### 3. Missing issue detections in analyze_pdf()
+### 4. Missing issue detections in analyze_pdf()
 These issues are defined in CLAUDE.md but analyze_pdf() does not check for
 them yet. All checks need to be added to the analyze_pdf() function.
 
@@ -65,7 +83,7 @@ them yet. All checks need to be added to the analyze_pdf() function.
 
 ---
 
-### 3. Alt text descriptions not saved to DOCX output
+### 5. Alt text descriptions not saved to DOCX output
 The per-image alt text workflow collects descriptions into
 `st.session_state.alt_text_results` but `build_docx_from_pdf()` never reads
 that dict — the descriptions are silently lost when the user downloads.
@@ -74,14 +92,14 @@ Word image alt text via python-docx.
 
 ---
 
-### 4. "No, let's try again" doesn't offer an alternative fix
+### 6. "No, let's try again" doesn't offer an alternative fix
 When faculty reject a proposed fix (render_resolving_issue, line ~2555),
 the app just returns to the issue list. Per CLAUDE.md it should offer an
 alternative approach or ask for more input before trying again.
 
 ---
 
-### 5. Stale "Phase 1" comments
+### 7. Stale "Phase 1" comments
 Lines ~2617 and ~2678 in app.py still say "Phase 1" but the code is
 already real Phase 2 behavior. Low priority — clean up when nearby code
 is touched.
