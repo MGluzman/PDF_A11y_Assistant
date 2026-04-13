@@ -2132,6 +2132,8 @@ def render_password_protected():
             st.session_state.done_reason = "password_exit"
             st.rerun()
 
+    _render_go_back("upload")
+
 
 # -----------------------------------------------------------------------------
 # STEP: password_walkthrough
@@ -2200,6 +2202,8 @@ def render_password_walkthrough():
             del st.session_state[key]
         init_state()
         st.rerun()
+
+    _render_go_back("password_protected")
 
 
 # -----------------------------------------------------------------------------
@@ -2278,6 +2282,8 @@ def render_scanned_doc():
             st.session_state.step = "scanned_goodbye"
             st.rerun()
 
+    _render_go_back("upload")
+
 
 # -----------------------------------------------------------------------------
 # STEP: scanned_goodbye
@@ -2325,6 +2331,8 @@ def render_scanned_goodbye():
             st.session_state.step = "done"
             st.session_state.done_reason = "scanned_exit"
             st.rerun()
+
+    _render_go_back("scanned_doc")
 
 
 # -----------------------------------------------------------------------------
@@ -2800,6 +2808,8 @@ def render_ocr_format_select():
             st.session_state.done_reason = "ocr_exit"
             st.rerun()
 
+    _render_go_back("scanned_doc")
+
 
 # -----------------------------------------------------------------------------
 # STEP: no_issues
@@ -2841,6 +2851,8 @@ def render_no_issues():
             st.session_state.step = "done"
             st.session_state.done_reason = "clean_exit"
             st.rerun()
+
+    _render_go_back("upload")
 
 
 # -----------------------------------------------------------------------------
@@ -2924,6 +2936,8 @@ def render_issue_list():
     st.divider()
     st.caption(f"{resolved} of {total} issues resolved")
 
+    _render_go_back("upload")
+
 
 # =============================================================================
 # STEP: image_alt_text
@@ -2945,6 +2959,22 @@ def render_issue_list():
 #   Not decorative, critical    → stays Red, full description required
 #   Not decorative, not critical → Yellow, brief description required
 # =============================================================================
+
+def _render_go_back(destination):
+    """
+    Render the linear "← Go back" button for non-remediation workflow screens.
+
+    This is simple step navigation — it moves the user to the preceding screen
+    without touching any session state beyond `step`. No work is lost.
+
+    Parameters:
+        destination (str): The step name to return to (e.g. "upload", "scanned_doc").
+    """
+    st.divider()
+    if st.button("← Go back", key=f"go_back_{destination}"):
+        st.session_state.step = destination
+        st.rerun()
+
 
 def _render_abandon_button():
     """
