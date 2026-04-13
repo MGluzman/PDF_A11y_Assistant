@@ -6,29 +6,7 @@
 
 ## PDF Assistant — Active Work
 
-### 1. Add linear "← Go back" button to non-remediation screens
-The Abandon button (for remediation screens) and image-level navigation (Previous /
-Skip / Skip fixing images) were implemented this session. What remains is the simpler
-linear back button for the workflow routing screens — scanned_doc, ocr_format_select,
-password screens, etc.
-
-See CLAUDE.md Navigation section for the full step-to-step map. The button:
-- Labels: `← Go back`
-- Only changes `st.session_state.step` — never wipes session state
-- Does not appear on `upload` or `done`
-
-Screens still missing it:
-- `password_protected` → `upload`
-- `password_walkthrough` → `password_protected`
-- `scanned_doc` → `upload`
-- `scanned_goodbye` → `scanned_doc`
-- `ocr_format_select` → `scanned_doc`
-- `no_issues` → `upload`
-- `issue_list` → `upload`
-
----
-
-### 2. Restructure the post-OCR screen ("happy with results?")
+### 1. Restructure the post-OCR screen ("happy with results?")
 Currently `ocr_format_select` shows downloads first, then asks about continuing.
 The decision should come first — downloading is never a gate to proceeding.
 
@@ -43,7 +21,7 @@ New structure:
 
 ---
 
-### 3. Save approved alt text descriptions into DOCX output
+### 2. Save approved alt text descriptions into DOCX output
 `build_docx_from_pdf()` now correctly excludes artifact/background images from
 output. What's still missing: approved alt text descriptions for informational
 images are collected in `st.session_state.alt_text_results` but never written
@@ -59,7 +37,7 @@ and set the `descr` attribute on the drawing element for true Word alt text.
 
 ---
 
-### 4. "No, let's try again" should offer an alternative approach
+### 3. "No, let's try again" should offer an alternative approach
 When faculty reject a proposed fix in `render_resolving_issue()`, the app currently
 just returns to the issue list. Per CLAUDE.md it should either offer an alternative
 fix path or ask the faculty member for more input before trying again.
@@ -73,7 +51,7 @@ What "alternative" means per issue:
 
 ---
 
-### 5. Missing issue detections in analyze_pdf()
+### 4. Missing issue detections in analyze_pdf()
 These issues are defined in CLAUDE.md but not yet checked. All need to be added
 to `analyze_pdf()`. Docling's structural data (available in `docling_doc`) should
 be used where relevant — especially for reading order and list tagging.
@@ -91,7 +69,7 @@ be used where relevant — especially for reading order and list tagging.
 
 ---
 
-### 6. Stale "Phase 1" comments in app.py
+### 5. Stale "Phase 1" comments in app.py
 A few comments still reference "Phase 1" but the code is already real behavior.
 Low priority — clean up when nearby code is touched rather than as a dedicated task.
 
