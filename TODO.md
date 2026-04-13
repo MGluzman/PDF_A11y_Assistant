@@ -69,7 +69,23 @@ be used where relevant — especially for reading order and list tagging.
 
 ---
 
-### 5. Stale "Phase 1" comments in app.py
+### 5. Add upload processing time disclaimer
+On the upload screen, add a brief notice below the file uploader letting
+faculty know that analysis may take a few minutes — longer for large files.
+Suggested wording:
+
+> "Once you upload your file, it may take a few minutes to analyze depending
+> on its size. Large files can take 5 minutes or more. Please be patient —
+> the tool is working."
+
+Place it as a `st.caption()` below the file uploader, visible only after
+the copyright checkbox is checked (same condition that enables the uploader).
+
+Priority: medium-low
+
+---
+
+### 7. Stale "Phase 1" comments in app.py
 A few comments still reference "Phase 1" but the code is already real behavior.
 Low priority — clean up when nearby code is touched rather than as a dedicated task.
 
