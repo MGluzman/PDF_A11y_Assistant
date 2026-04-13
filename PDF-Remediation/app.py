@@ -199,30 +199,38 @@ OCR_DISCLAIMER = (
 # =============================================================================
 # OCR HELPER FUNCTIONS
 # =============================================================================
-# These three functions handle the full OCR pipeline:
-#   run_ocr()    — renders each PDF page as an image and extracts text
-#   build_docx() — assembles extracted text into a downloadable DOCX file
-#   build_pdf()  — assembles extracted text into a downloadable PDF file
+# These functions handle the OCR pipeline:
+#   run_ocr()      — runs Tesseract on pre-processed PIL Images, returns text per page
+#   run_easyocr()  — runs EasyOCR on pre-processed PIL Images, returns text per page
+#   build_docx()   — assembles extracted text into a downloadable DOCX file
+#   build_pdf()    — assembles extracted text into a downloadable PDF file
+#
+# Page rendering and preprocessing (300 DPI, orientation + skew correction) is
+# handled upstream by preprocess_pages() before either OCR function is called.
 #
 # Both build_* functions append the OCR_DISCLAIMER at the end per CLAUDE.md.
 # Both return raw bytes so Streamlit's st.download_button can serve them
 # directly without writing anything to disk.
 # =============================================================================
 
-def run_ocr(file_bytes, tesseract_path):
+def run_ocr(pil_images, tesseract_path):
     """
-    Extract text from every page of a scanned PDF using Tesseract OCR.
+    Extract text from pre-processed page images using Tesseract OCR.
+
+    Accepts PIL Images that have already been rendered and corrected by
+    preprocess_pages() — orientation and skew fixes are applied before
+    this function is called, so it only handles the OCR step itself.
 
     Approach:
       1. Configure pytesseract to use the binary at tesseract_path.
-      2. Use PyMuPDF (fitz) to render each page as a 300 DPI PNG image.
-         300 DPI gives Tesseract enough detail to read small body text accurately.
-         (72 DPI — screen resolution — is too low for reliable OCR.)
-      3. Convert each PNG to a PIL Image and pass it to pytesseract.
-      4. Return the extracted text as a list — one string per page.
+      2. Run image_to_string() on each PIL Image in order.
+         The images are assumed to be 300 DPI — that resolution is set
+         by preprocess_pages() when it renders pages from the PDF.
+      3. Return the extracted text as a list — one string per page.
 
     Parameters:
-        file_bytes (bytes): Raw bytes of the uploaded PDF.
+        pil_images (list[PIL.Image]): Pre-processed page images from
+                                     preprocess_pages(), in document order.
         tesseract_path (str): Full path to the tesseract executable
                               (e.g. C:\\Program Files\\Tesseract-OCR\\tesseract.exe).
 
@@ -237,30 +245,9 @@ def run_ocr(file_bytes, tesseract_path):
     # This must be set before any image_to_string() call.
     pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    pages_text = []
-
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-
-        # Render the page at 300 DPI.
-        # fitz.Matrix scales the default 72 DPI coordinate space.
-        # 300 / 72 ≈ 4.17 — each dimension is scaled up ~4x for higher resolution.
-        mat = fitz.Matrix(300 / 72, 300 / 72)
-        pix = page.get_pixmap(matrix=mat)
-
-        # Convert the raw pixel data to a PIL Image via an in-memory PNG buffer.
-        # pytesseract expects a PIL Image or a file path — we use PIL Image
-        # to avoid writing temporary files to disk.
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
-
-        # Run OCR. lang="eng" tells Tesseract to use the English language model.
-        # In Phase 2, this could be made configurable for multilingual documents.
-        text = pytesseract.image_to_string(img, lang="eng")
-        pages_text.append(text)
-
-    doc.close()
-    return pages_text
+    # lang="eng" tells Tesseract to use the English language model.
+    # In a future iteration this could be made configurable for multilingual documents.
+    return [pytesseract.image_to_string(img, lang="eng") for img in pil_images]
 
 
 def build_docx(pages_text):
@@ -420,16 +407,29 @@ def score_ocr_quality(pages_text):
 # reuse the cached models. gpu=False ensures it runs on any machine.
 # =============================================================================
 
-def run_easyocr(file_bytes):
+def run_easyocr(pil_images):
     """
-    Extract text from every page of a scanned PDF using EasyOCR.
+    Extract text from pre-processed page images using EasyOCR.
 
-    Renders each page at 300 DPI (same as Tesseract pass), converts to a
-    numpy array, and passes it to the EasyOCR reader. Results are sorted
-    top-to-bottom by bounding-box Y coordinate to approximate reading order.
+    Accepts PIL Images that have already been rendered and corrected by
+    preprocess_pages() — orientation and skew fixes are applied before
+    this function is called, so it only handles the OCR step itself.
+
+    Uses a neural-network model (CRAFT text detector + CRNN recogniser)
+    which handles skewed, low-contrast, and unusual-font scans better than
+    Tesseract's pattern matching. Results are sorted top-to-bottom by
+    bounding-box Y coordinate to approximate visual reading order.
+
+    EasyOCR and numpy are imported inside the function because they are
+    optional dependencies — importing them lazily avoids import errors on
+    machines where EasyOCR is not installed.
+
+    On first call EasyOCR downloads ~200 MB of model weights. Subsequent
+    calls reuse the cached models. gpu=False ensures it runs on any machine.
 
     Parameters:
-        file_bytes (bytes): Raw bytes of the uploaded PDF.
+        pil_images (list[PIL.Image]): Pre-processed page images from
+                                     preprocess_pages(), in document order.
 
     Returns:
         list[str]: Extracted text for each page, in document order.
@@ -441,18 +441,13 @@ def run_easyocr(file_bytes):
     import numpy as np
 
     reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
     pages_text = []
 
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        mat = fitz.Matrix(300 / 72, 300 / 72)
-        pix = page.get_pixmap(matrix=mat)
-        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-            pix.height, pix.width, pix.n
-        )
-        # EasyOCR expects RGB; PyMuPDF gives RGB or RGBA depending on the page.
-        if pix.n == 4:
+    for img in pil_images:
+        # Convert PIL Image to a numpy array for EasyOCR.
+        # Strip the alpha channel if present — EasyOCR expects RGB only.
+        img_array = np.array(img)
+        if img_array.ndim == 3 and img_array.shape[2] == 4:
             img_array = img_array[:, :, :3]
 
         results = reader.readtext(img_array)
@@ -460,10 +455,8 @@ def run_easyocr(file_bytes):
         # Sort detections top-to-bottom by the top-left Y coordinate of the
         # bounding box so text flows in visual reading order.
         results.sort(key=lambda r: r[0][0][1])
-        page_text = " ".join(r[1] for r in results)
-        pages_text.append(page_text)
+        pages_text.append(" ".join(r[1] for r in results))
 
-    doc.close()
     return pages_text
 
 
@@ -2402,11 +2395,7 @@ def render_running_ocr():
         # ---- Step 2: OCR ----
         if pil_images:
             try:
-                pytesseract.pytesseract.tesseract_cmd = tesseract_path
-                pages_text = [
-                    pytesseract.image_to_string(img, lang="eng")
-                    for img in pil_images
-                ]
+                pages_text = run_ocr(pil_images, tesseract_path)
 
                 quality_score, quality_label = score_ocr_quality(pages_text)
                 st.session_state.ocr_quality_score  = quality_score
@@ -2501,17 +2490,7 @@ def render_running_easyocr():
             )
 
             # Run EasyOCR on the corrected images.
-            import easyocr as _easyocr
-            import numpy as np
-            reader = _easyocr.Reader(["en"], gpu=False, verbose=False)
-            pages_text = []
-            for img in pil_images:
-                img_array = np.array(img)
-                if img_array.ndim == 3 and img_array.shape[2] == 4:
-                    img_array = img_array[:, :, :3]
-                results = reader.readtext(img_array)
-                results.sort(key=lambda r: r[0][0][1])
-                pages_text.append(" ".join(r[1] for r in results))
+            pages_text = run_easyocr(pil_images)
 
             quality_score, quality_label = score_ocr_quality(pages_text)
 
