@@ -2410,10 +2410,17 @@ def render_running_ocr():
                     f"{quality_label} ({quality_score}%)",
                 ]
                 st.session_state.ocr_pages_text = pages_text
-                st.session_state.ocr_docx_bytes = build_docx(pages_text)
-                ocr_pdf_bytes = build_pdf(pages_text)
-                st.session_state.ocr_pdf_bytes  = ocr_pdf_bytes
 
+                # Don't build DOCX/PDF here — render_ocr_format_select() builds
+                # them lazily on first render and caches the result. Building here
+                # would be wasted work if the user only downloads one format.
+                # Clear any stale cached output from a previous OCR run.
+                st.session_state.ocr_docx_bytes = None
+                st.session_state.ocr_pdf_bytes  = None
+
+                # analyze_pdf() needs a PDF to inspect, so we still build the PDF
+                # here — but only to drive the accessibility analysis, not for download.
+                ocr_pdf_bytes = build_pdf(pages_text)
                 analysis_result = analyze_pdf(ocr_pdf_bytes)
                 st.session_state.ocr_issues = (
                     analysis_result["issues"]
@@ -2504,15 +2511,19 @@ def render_running_easyocr():
                 f"{quality_label} ({quality_score}%)",
             ]
 
-            st.session_state.ocr_pages_text    = pages_text
-            st.session_state.ocr_quality_score = quality_score
-            st.session_state.ocr_quality_label = quality_label
-            st.session_state.ocr_engine_used   = "easyocr"
+            st.session_state.ocr_pages_text     = pages_text
+            st.session_state.ocr_quality_score  = quality_score
+            st.session_state.ocr_quality_label  = quality_label
+            st.session_state.ocr_engine_used    = "easyocr"
             st.session_state.ocr_processing_log = processing_log
-            st.session_state.ocr_docx_bytes    = build_docx(pages_text)
-            ocr_pdf_bytes                       = build_pdf(pages_text)
-            st.session_state.ocr_pdf_bytes     = ocr_pdf_bytes
 
+            # Clear the cached DOCX/PDF from the Tesseract pass so
+            # render_ocr_format_select() rebuilds them from the updated text.
+            st.session_state.ocr_docx_bytes = None
+            st.session_state.ocr_pdf_bytes  = None
+
+            # Build PDF for accessibility analysis only (not for download cache).
+            ocr_pdf_bytes = build_pdf(pages_text)
             analysis_result = analyze_pdf(ocr_pdf_bytes)
             st.session_state.ocr_issues = (
                 analysis_result["issues"]
@@ -2565,7 +2576,21 @@ def render_ocr_format_select():
     st.title("♿ PDF Assistant")
     st.divider()
 
-    page_count = len(st.session_state.ocr_pages_text)
+    pages_text = st.session_state.ocr_pages_text
+    page_count = len(pages_text)
+
+    # -------------------------------------------------------------------------
+    # BUILD OUTPUT FILES — lazy, cached
+    # DOCX and PDF are built here on first render (or after EasyOCR clears them)
+    # rather than in the OCR runner, so we never build a format the user won't
+    # download. Results are cached in session state and reused on every rerender
+    # of this screen (e.g. when the user scrolls the text preview).
+    # -------------------------------------------------------------------------
+    if not st.session_state.ocr_docx_bytes:
+        with st.spinner("Preparing your readable files..."):
+            st.session_state.ocr_docx_bytes = build_docx(pages_text)
+            st.session_state.ocr_pdf_bytes  = build_pdf(pages_text)
+
     st.success(
         f"Conversion complete — {page_count} page{'s' if page_count != 1 else ''} "
         "of readable text extracted successfully."
@@ -2590,7 +2615,6 @@ def render_ocr_format_select():
     # Show the quality estimate so the faculty member can decide whether to
     # accept the result or request a second pass with EasyOCR.
     # -------------------------------------------------------------------------
-    pages_text    = st.session_state.ocr_pages_text
     quality_score = st.session_state.get("ocr_quality_score")
     quality_label = st.session_state.get("ocr_quality_label", "Unknown")
     engine_used   = st.session_state.get("ocr_engine_used", "Tesseract")
