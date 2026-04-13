@@ -1905,6 +1905,8 @@ def init_state():
         "alt_text_auto_classifications": {},  # {xref: {classification, confidence, reason}}
         "docling_doc": None,        # DoclingDocument from _run_docling() — cached here so
                                     # build_docx_from_pdf() can use it without re-converting
+        "edited_docx_bytes": None,  # Cached DOCX output from build_docx_from_pdf() — built
+                                    # once on first render of choose_format, reused on reruns
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -4020,6 +4022,16 @@ def render_choose_format():
     # Fall back to the original if working_pdf_bytes was never set.
     output_pdf_bytes = st.session_state.working_pdf_bytes or st.session_state.file_bytes
 
+    # Build the DOCX once and cache it in session state.
+    # build_docx_from_pdf() runs Docling over the entire document — it's expensive.
+    # Streamlit reruns this whole function on every user interaction (e.g. clicking
+    # the PDF download button), so without caching the DOCX would be rebuilt every
+    # time even when the user never asked for it.
+    if "edited_docx_bytes" not in st.session_state:
+        with st.spinner("Building your Word document..."):
+            st.session_state.edited_docx_bytes = build_docx_from_pdf(output_pdf_bytes)
+    docx_bytes = st.session_state.edited_docx_bytes
+
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**Word processor document (DOCX)**")
@@ -4028,10 +4040,6 @@ def render_choose_format():
             "Best if you need to edit the content further before re-publishing, or "
             "if you want to re-export as a properly tagged PDF from Word."
         )
-        # Build the DOCX now so the download button appears immediately.
-        # build_docx_from_pdf() uses font-size heuristics to preserve headings.
-        with st.spinner("Building your Word document..."):
-            docx_bytes = build_docx_from_pdf(output_pdf_bytes)
         st.download_button(
             label=f"Download {docx_name}",
             data=docx_bytes,
