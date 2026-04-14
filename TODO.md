@@ -6,7 +6,42 @@
 
 ## PDF Assistant — Active Work
 
-### 1. Restructure the post-OCR screen ("happy with results?")
+### 1. ⚡ Use Docling PICTURE detections for image alt text (not just PyMuPDF XObjects)
+**Priority: high**
+
+**Problem:** `analyze_pdf()` finds images using only PyMuPDF's `page.get_images()`, which
+returns PDF image XObjects. In a pre-OCR'd scanned PDF, the page content is a text layer
+over a background scan — any content images (photos, figures, diagrams) are pixel regions
+within that background, not separate XObjects. PyMuPDF finds nothing (or just the background).
+Docling's DocLayNet vision transformer analyses rendered pixels and DOES detect PICTURE regions
+in these documents — but `analyze_pdf()` never looks at Docling's PICTURE detections. The alt
+text workflow is entirely PyMuPDF-only and silently misses all embedded content images.
+
+**Fix:**
+1. In `analyze_pdf()`, after `_run_docling()`, walk `docling_doc.iterate_items()` for
+   `DocItemLabel.PICTURE` items. Pull each item's page number and bounding box from
+   `item.prov[0]`. Add to the images list alongside any XObjects PyMuPDF found.
+   Store as `{"page": n, "bbox": (x0, y0, x1, y1), "source": "docling"}` to distinguish
+   from XObject images which use `{"page": n, "xref": n, "source": "pymupdf"}`.
+
+2. In the alt text workflow, branch on `source`:
+   - `"pymupdf"` → existing path: `extract_image_from_pdf(pdf_bytes, xref)`
+   - `"docling"` → new path: render the page with PyMuPDF at 300 DPI, crop at bbox using Pillow
+
+3. Update `render_page_with_image_highlight()` to accept either an xref or a bbox so the
+   red-border page-context view works for both image types.
+
+4. Update `alt_text_results` keying — currently uses `xref` (int) as the dict key.
+   For Docling images, use a string key like `"docling_{page}_{x0}_{y0}"` to avoid
+   collisions.
+
+5. Update `build_docx_from_pdf()` Docling path: when writing a PICTURE placeholder,
+   look up the matching `alt_text_results` entry by page number and include the approved
+   description alongside the placeholder.
+
+---
+
+### 3. Restructure the post-OCR screen ("happy with results?")
 Currently `ocr_format_select` shows downloads first, then asks about continuing.
 The decision should come first — downloading is never a gate to proceeding.
 
@@ -21,7 +56,7 @@ New structure:
 
 ---
 
-### 2. Save approved alt text descriptions into DOCX output
+### 4. Save approved alt text descriptions into DOCX output
 `build_docx_from_pdf()` now correctly excludes artifact/background images from
 output. What's still missing: approved alt text descriptions for informational
 images are collected in `st.session_state.alt_text_results` but never written
@@ -37,7 +72,7 @@ and set the `descr` attribute on the drawing element for true Word alt text.
 
 ---
 
-### 3. "No, let's try again" should offer an alternative approach
+### 5. "No, let's try again" should offer an alternative approach
 When faculty reject a proposed fix in `render_resolving_issue()`, the app currently
 just returns to the issue list. Per CLAUDE.md it should either offer an alternative
 fix path or ask the faculty member for more input before trying again.
@@ -51,7 +86,7 @@ What "alternative" means per issue:
 
 ---
 
-### 4. Missing issue detections in analyze_pdf()
+### 6. Missing issue detections in analyze_pdf()
 These issues are defined in CLAUDE.md but not yet checked. All need to be added
 to `analyze_pdf()`. Docling's structural data (available in `docling_doc`) should
 be used where relevant — especially for reading order and list tagging.
@@ -69,7 +104,7 @@ be used where relevant — especially for reading order and list tagging.
 
 ---
 
-### 5. Add upload processing time disclaimer
+### 7. Add upload processing time disclaimer
 On the upload screen, add a brief notice below the file uploader letting
 faculty know that analysis may take a few minutes — longer for large files.
 Suggested wording:
