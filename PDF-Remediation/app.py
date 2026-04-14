@@ -4051,7 +4051,7 @@ def render_choose_format():
     # Streamlit reruns this whole function on every user interaction (e.g. clicking
     # the PDF download button), so without caching the DOCX would be rebuilt every
     # time even when the user never asked for it.
-    if "edited_docx_bytes" not in st.session_state:
+    if not st.session_state.edited_docx_bytes:
         with st.spinner("Building your Word document..."):
             st.session_state.edited_docx_bytes = build_docx_from_pdf(output_pdf_bytes)
     docx_bytes = st.session_state.edited_docx_bytes
