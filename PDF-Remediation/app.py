@@ -61,8 +61,8 @@ st.set_page_config(
 # =============================================================================
 # DEMO ISSUE DATA
 # =============================================================================
-# In Phase 1, the analysis engine returns this hardcoded list of demo issues.
-# In Phase 2, real PDF analysis libraries will generate this list dynamically.
+# Fallback issue list returned by analyze_pdf() when PDF parsing fails entirely.
+# Keeps the app functional with a recognizable set of issues rather than crashing.
 #
 # Each issue is a dictionary with:
 #   id          — unique identifier used to track resolution
@@ -4446,7 +4446,8 @@ def render_re_analysis():
     """
     Purpose: Offer to re-analyze the document after every 3 resolved issues.
     Per CLAUDE.md: verbatim message and exactly two choices.
-    Phase 1: re-analysis is simulated (same demo issue list).
+    Re-analysis calls analyze_pdf() on the current working copy so resolved
+    issues are removed and any newly introduced issues are surfaced.
     """
     st.title("♿ PDF Assistant")
     st.divider()
@@ -4509,7 +4510,8 @@ def render_choose_format():
     """
     Purpose: Let the user choose their output format (DOCX or PDF).
     Per CLAUDE.md: file name gets "_edited" appended before the extension.
-    Phase 1: delivers the original file as a placeholder download.
+    Builds the chosen format from the current working copy and serves it
+    as a download via st.download_button.
     """
     st.title("♿ PDF Assistant")
     st.divider()

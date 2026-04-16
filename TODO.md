@@ -75,9 +75,7 @@ be used where relevant — especially for reading order and list tagging.
 
 ---
 
-### 7. Stale "Phase 1" comments in app.py
-A few comments still reference "Phase 1" but the code is already real behavior.
-Low priority — clean up when nearby code is touched rather than as a dedicated task.
+### ~~7. Stale "Phase 1" comments in app.py~~ ✅ Done 2026-04-16
 
 ---
 
