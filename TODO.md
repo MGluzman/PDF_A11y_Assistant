@@ -1,43 +1,19 @@
 # To Do Next — Agentic AI Accessibility Suite
 
-**Last updated:** 2026-04-13
+**Last updated:** 2026-04-16
 
 ---
 
 ## PDF Assistant — Active Work
 
-### 1. ⚡ Use Docling PICTURE detections for image alt text (not just PyMuPDF XObjects)
-**Priority: high**
-
-**Problem:** `analyze_pdf()` finds images using only PyMuPDF's `page.get_images()`, which
-returns PDF image XObjects. In a pre-OCR'd scanned PDF, the page content is a text layer
-over a background scan — any content images (photos, figures, diagrams) are pixel regions
-within that background, not separate XObjects. PyMuPDF finds nothing (or just the background).
-Docling's DocLayNet vision transformer analyses rendered pixels and DOES detect PICTURE regions
-in these documents — but `analyze_pdf()` never looks at Docling's PICTURE detections. The alt
-text workflow is entirely PyMuPDF-only and silently misses all embedded content images.
-
-**Fix:**
-1. In `analyze_pdf()`, after `_run_docling()`, walk `docling_doc.iterate_items()` for
-   `DocItemLabel.PICTURE` items. Pull each item's page number and bounding box from
-   `item.prov[0]`. Add to the images list alongside any XObjects PyMuPDF found.
-   Store as `{"page": n, "bbox": (x0, y0, x1, y1), "source": "docling"}` to distinguish
-   from XObject images which use `{"page": n, "xref": n, "source": "pymupdf"}`.
-
-2. In the alt text workflow, branch on `source`:
-   - `"pymupdf"` → existing path: `extract_image_from_pdf(pdf_bytes, xref)`
-   - `"docling"` → new path: render the page with PyMuPDF at 300 DPI, crop at bbox using Pillow
-
-3. Update `render_page_with_image_highlight()` to accept either an xref or a bbox so the
-   red-border page-context view works for both image types.
-
-4. Update `alt_text_results` keying — currently uses `xref` (int) as the dict key.
-   For Docling images, use a string key like `"docling_{page}_{x0}_{y0}"` to avoid
-   collisions.
-
-5. Update `build_docx_from_pdf()` Docling path: when writing a PICTURE placeholder,
-   look up the matching `alt_text_results` entry by page number and include the approved
-   description alongside the placeholder.
+### ~~1. ⚡ Use Docling PICTURE detections for image alt text~~ ✅ Done 2026-04-16
+All 5 sub-steps implemented:
+- `analyze_pdf()` merges Docling PICTURE items with PyMuPDF XObjects; each image dict
+  now carries `img_key`, `source`, and `bbox` (Docling) or `xref` (PyMuPDF).
+- New `extract_image_by_source()` dispatches on source (XObject extract vs. page crop).
+- `render_page_with_image_highlight()` accepts `xref=` or `bbox=` keyword.
+- All `alt_text_results` keying now uses `img_key` throughout the alt text workflow.
+- `build_docx_from_pdf()` uses `img_key`-based page grouping for exclusion/description lookup.
 
 ---
 
@@ -56,19 +32,10 @@ New structure:
 
 ---
 
-### 4. Save approved alt text descriptions into DOCX output
-`build_docx_from_pdf()` now correctly excludes artifact/background images from
-output. What's still missing: approved alt text descriptions for informational
-images are collected in `st.session_state.alt_text_results` but never written
-into the Word document as actual image alt text.
-
-Fix: in `build_docx_from_pdf()` (PyMuPDF fallback path), when inserting an image
-placeholder, look up the xref in `alt_text_results` and append the approved
-description text alongside the placeholder. For the Docling path, do the same
-by page number for non-excluded PICTURE items.
-
-Longer term: use python-docx to insert actual inline images with `add_picture()`
-and set the `descr` attribute on the drawing element for true Word alt text.
+### ~~4. Save approved alt text descriptions into DOCX output~~ ✅ Done 2026-04-16
+Longer-term follow-up: use python-docx `add_picture()` + set the `descr`
+attribute on the drawing element for true Word alt text (currently descriptions
+are written as visible placeholder text).
 
 ---
 
@@ -104,19 +71,7 @@ be used where relevant — especially for reading order and list tagging.
 
 ---
 
-### 7. Add upload processing time disclaimer
-On the upload screen, add a brief notice below the file uploader letting
-faculty know that analysis may take a few minutes — longer for large files.
-Suggested wording:
-
-> "Once you upload your file, it may take a few minutes to analyze depending
-> on its size. Large files can take 5 minutes or more. Please be patient —
-> the tool is working."
-
-Place it as a `st.caption()` below the file uploader, visible only after
-the copyright checkbox is checked (same condition that enables the uploader).
-
-Priority: medium-low
+### ~~7. Add upload processing time disclaimer~~ ✅ Done 2026-04-16
 
 ---
 

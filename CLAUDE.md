@@ -1,5 +1,12 @@
 # CLAUDE.md - Project Instructions
 
+## Session Start
+
+Before starting any new task, read `TODO.md` (in this directory) to get an up-to-date
+picture of outstanding work. Use it to orient quickly without the user needing to
+re-explain context. Do not modify `TODO.md` unless the user asks — it is the user's
+source of truth for what remains to be done.
+
 ## About This Project
 This is a learning environment for exploring Claude Code and programming languages.
 

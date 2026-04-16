@@ -23,8 +23,11 @@
 
 import io                    # In-memory byte streams for building files without writing to disk
 import os                    # File system operations — used for temp file cleanup in Docling helper
+import shutil                # shutil.which() — locate executables on the system PATH
+import subprocess            # Run Tesseract as a subprocess to verify it is callable
 import tempfile              # Creates temporary files that Docling's converter can read by path
 import time                  # Used for brief delays during state transitions
+import urllib.request        # Lightweight HTTP HEAD requests for API endpoint health checks
 from collections import Counter  # Frequency counting for font-size heuristics
 import fitz                  # PyMuPDF — opens PDFs, renders pages as images, checks password
 import pikepdf               # Low-level PDF editing — writes metadata and structural fixes
@@ -194,6 +197,173 @@ OCR_DISCLAIMER = (
     "Tesseract OCR and Claude AI. While every effort has been made to ensure "
     "accuracy, some errors may remain. Please review the content before distributing."
 )
+
+
+# =============================================================================
+# PREFLIGHT CHECK
+# =============================================================================
+# preflight_check() is called at the start of every pipeline that touches
+# external resources. It catches three classes of failure before the pipeline
+# gets underway so the user sees a clear, actionable message instead of a
+# cryptic traceback mid-process.
+#
+# The three checks:
+#   1. Tesseract — is the binary on PATH and does it respond to --version?
+#   2. API endpoints — do all required HTTP endpoints return a 2xx status?
+#      (This list is empty today; add URLs here when external services are added.)
+#   3. Output paths — can the app write to every path it will need to use?
+#      Passing tempfile.gettempdir() catches a full or read-only temp directory
+#      before Docling tries to create its temporary PDF and fails silently.
+#
+# Return value:
+#   {"ok": bool, "errors": list[str]}
+#   "ok" is True only when all requested checks pass.
+#   "errors" contains one plain-English message for every failed check.
+#   Callers should display every message in the list, then stop the pipeline.
+# =============================================================================
+
+def preflight_check(tesseract_path=None, api_endpoints=None, output_paths=None):
+    """
+    Verify external dependencies before starting a pipeline.
+
+    Parameters:
+        tesseract_path (str | None):
+            Full path to the Tesseract executable (e.g. the value from the
+            sidebar settings field). When provided, the function checks that
+            Tesseract can be found — either at this exact path OR somewhere
+            on the system PATH — and that it actually responds to --version.
+            Pass None to skip the Tesseract check (e.g. when Tesseract is
+            not needed for the pipeline being started).
+
+        api_endpoints (list[str] | None):
+            HTTP/HTTPS URLs that must return a 2xx status before the pipeline
+            can proceed. The check uses a lightweight HEAD request with a
+            5-second timeout. Pass None or an empty list to skip.
+
+        output_paths (list[str] | None):
+            File-system paths the pipeline will write to. The check opens each
+            path in append-binary mode to confirm write access and that no other
+            process holds an exclusive lock. Pass None to skip.
+            Tip: always include tempfile.gettempdir() for pipelines that use
+            Docling, since Docling writes a temporary PDF there.
+
+    Returns:
+        dict with keys:
+            "ok"     (bool)       — True if every requested check passed
+            "errors" (list[str])  — one human-readable message per failure
+    """
+    errors = []
+
+    # ------------------------------------------------------------------
+    # Check 1 — Tesseract is installed and callable
+    # ------------------------------------------------------------------
+    # Why two sub-checks?
+    #   shutil.which("tesseract") finds the binary through the system PATH.
+    #   The configured path in the sidebar may differ from the PATH entry
+    #   (e.g. a custom install location on Windows). We accept either one
+    #   as proof that Tesseract is available, but we always try to run the
+    #   configured path so the subprocess call later will actually work.
+    # ------------------------------------------------------------------
+    if tesseract_path is not None:
+        # Sub-check A: is "tesseract" discoverable on the system PATH?
+        on_path = shutil.which("tesseract") is not None
+
+        # Sub-check B: does the configured path respond to --version?
+        configured_ok = False
+        try:
+            result = subprocess.run(
+                [tesseract_path, "--version"],
+                capture_output=True,    # suppress console output
+                timeout=5,              # bail out after 5 seconds
+            )
+            # returncode 0 means Tesseract ran successfully.
+            configured_ok = result.returncode == 0
+        except FileNotFoundError:
+            # The path doesn't point to any file at all.
+            pass
+        except PermissionError:
+            # The file exists but the OS won't let us execute it.
+            pass
+        except subprocess.TimeoutExpired:
+            # Tesseract started but didn't respond in time.
+            pass
+
+        if not on_path and not configured_ok:
+            # Neither location works — Tesseract is not usable.
+            errors.append(
+                f"Tesseract OCR could not be found. "
+                f"Verify that Tesseract is installed and that the path in the "
+                f"sidebar settings is correct.\n"
+                f"Configured path: `{tesseract_path}`\n"
+                f"Download Tesseract: https://github.com/UB-Mannheim/tesseract/wiki"
+            )
+        elif not configured_ok:
+            # Found on PATH but the configured path is wrong — tell the user
+            # exactly which setting to fix.
+            errors.append(
+                f"Tesseract was found on the system PATH but could not be run "
+                f"from the path entered in sidebar settings.\n"
+                f"Configured path: `{tesseract_path}`\n"
+                f"Please update the Tesseract path in the ⚙️ Settings panel."
+            )
+
+    # ------------------------------------------------------------------
+    # Check 2 — Required API endpoints return 2xx
+    # ------------------------------------------------------------------
+    # Currently this list is empty — the app uses no external APIs.
+    # Add endpoint URLs here when external services (e.g. Claude API health
+    # check, a storage backend) are introduced.
+    # ------------------------------------------------------------------
+    if api_endpoints:
+        for url in api_endpoints:
+            try:
+                req = urllib.request.Request(url, method="HEAD")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    # Any status in the 400–599 range is a failure.
+                    if resp.status >= 400:
+                        errors.append(
+                            f"Required API endpoint returned HTTP {resp.status}: {url}\n"
+                            f"The service may be down or misconfigured."
+                        )
+            except urllib.error.URLError as exc:
+                errors.append(
+                    f"Required API endpoint is unreachable: {url}\n"
+                    f"Network error: {exc.reason}"
+                )
+            except Exception as exc:
+                errors.append(
+                    f"Could not check API endpoint: {url}\n"
+                    f"Error: {exc}"
+                )
+
+    # ------------------------------------------------------------------
+    # Check 3 — Output paths are writable and not locked
+    # ------------------------------------------------------------------
+    # On Windows, opening a file in 'a+b' (append-binary) mode raises
+    # PermissionError if another process holds an exclusive write lock.
+    # On all platforms it raises OSError if the directory doesn't exist
+    # or the file system is read-only.
+    # ------------------------------------------------------------------
+    if output_paths:
+        for path in output_paths:
+            try:
+                # Open in append-binary mode so we don't truncate any
+                # existing content — we only need to confirm write access.
+                with open(path, "a+b"):
+                    pass
+            except PermissionError:
+                errors.append(
+                    f"Output path is locked by another process or the app "
+                    f"does not have write permission: `{path}`\n"
+                    f"Close any applications that may have this file open and try again."
+                )
+            except OSError as exc:
+                errors.append(
+                    f"Output path is not writable: `{path}`\n"
+                    f"OS error: {exc}"
+                )
+
+    return {"ok": len(errors) == 0, "errors": errors}
 
 
 # =============================================================================
@@ -727,47 +897,58 @@ def auto_classify_image(img_bytes, bbox, page_rect):
 def run_auto_classification(images, pdf_bytes):
     """
     Run auto_classify_image() on every image in the list and return a dict
-    mapping xref → classification result.
+    mapping img_key → classification result.
 
-    Requires the image's bounding box on its page, which we get from
-    page.get_image_rects(xref). If no rect is found for an xref we fall back
-    to a zero-area bbox so pixel stats still run but geometry checks all fail
-    safely (defaulting to "content").
+    Handles both image sources:
+      "pymupdf" — extracts the XObject directly and gets bbox via get_image_rects()
+      "docling"  — crops the rendered page at the stored bbox for pixel stats;
+                   uses the stored bbox for geometry checks
 
     Parameters:
-        images (list[dict]): Each dict has "xref" and "page" (1-based).
+        images    (list[dict]): Image metadata dicts from analyze_pdf().
+                                Each dict must have "img_key", "page", and "source".
         pdf_bytes (bytes): Current working copy of the PDF.
 
     Returns:
-        dict: {xref (int): classification_result (dict)}
+        dict: {img_key: classification_result (dict)}
+              img_key is an int (xref) for pymupdf images and a string for docling images.
     """
     results = {}
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         for img_meta in images:
-            xref     = img_meta["xref"]
-            page_idx = img_meta["page"] - 1  # convert to 0-based
+            img_key  = img_meta.get("img_key", img_meta.get("xref"))
+            source   = img_meta.get("source", "pymupdf")
+            page_idx = img_meta["page"] - 1   # convert to 0-based
             try:
                 page      = doc[page_idx]
                 page_rect = page.rect
-                rects     = page.get_image_rects(xref)
-                bbox      = rects[0] if rects else fitz.Rect(0, 0, 0, 0)
 
-                img_bytes_raw, _ = None, None
-                img_info = doc.extract_image(xref)
-                if img_info:
-                    img_bytes_raw = img_info["image"]
+                if source == "docling":
+                    # Docling image: bbox is already stored in TOPLEFT PDF point space.
+                    # Wrap in a fitz.Rect so the geometry calculations in
+                    # auto_classify_image() work the same way as for pymupdf images.
+                    raw_bbox      = img_meta.get("bbox")
+                    fitz_bbox     = fitz.Rect(*raw_bbox) if raw_bbox else fitz.Rect(0, 0, 0, 0)
+                    img_bytes_raw, _ = extract_image_by_source(pdf_bytes, img_meta)
+                else:
+                    # PyMuPDF image: look up bbox via get_image_rects and extract XObject.
+                    xref          = img_meta["xref"]
+                    rects         = page.get_image_rects(xref)
+                    fitz_bbox     = rects[0] if rects else fitz.Rect(0, 0, 0, 0)
+                    img_info      = doc.extract_image(xref)
+                    img_bytes_raw = img_info["image"] if img_info else None
 
                 if img_bytes_raw:
-                    results[xref] = auto_classify_image(img_bytes_raw, bbox, page_rect)
+                    results[img_key] = auto_classify_image(img_bytes_raw, fitz_bbox, page_rect)
                 else:
-                    results[xref] = {
+                    results[img_key] = {
                         "classification": "content",
                         "confidence": 0.50,
                         "reason": "Image data could not be extracted for classification.",
                     }
             except Exception:
-                results[xref] = {
+                results[img_key] = {
                     "classification": "content",
                     "confidence": 0.50,
                     "reason": "Classification failed for this image.",
@@ -778,7 +959,7 @@ def run_auto_classification(images, pdf_bytes):
     return results
 
 
-def render_page_with_image_highlight(pdf_bytes, page_num, xref):
+def render_page_with_image_highlight(pdf_bytes, page_num, xref=None, bbox=None):
     """
     Render a full PDF page and draw a thick red border around a specific image.
 
@@ -789,7 +970,9 @@ def render_page_with_image_highlight(pdf_bytes, page_num, xref):
     Approach:
       1. Render the page at 150 DPI (good enough for context, fast enough to
          not slow down the per-image workflow noticeably).
-      2. Use page.get_image_rects(xref) to find where the image sits on the page.
+      2. Locate the image bounding box — either from get_image_rects(xref)
+         for PyMuPDF XObject images, or directly from the bbox parameter for
+         Docling PICTURE regions (already in PDF point space, TOPLEFT origin).
       3. Scale the bounding box from PDF points to pixel coordinates.
       4. Draw a thick red rectangle on the rendered pixmap using Pillow's
          ImageDraw — this keeps the dependency on libraries we already have
@@ -797,8 +980,12 @@ def render_page_with_image_highlight(pdf_bytes, page_num, xref):
 
     Parameters:
         pdf_bytes (bytes): The current working copy of the PDF.
-        page_num (int): 0-based page index where the image appears.
-        xref (int): The cross-reference number of the image to highlight.
+        page_num  (int):   0-based page index where the image appears.
+        xref      (int):   XObject cross-reference number — used for PyMuPDF images.
+                           Pass None when using bbox instead.
+        bbox      (tuple): (x0, y0, x1, y1) in PDF points, TOPLEFT origin —
+                           used for Docling PICTURE regions. Pass None when
+                           using xref instead.
 
     Returns:
         bytes: PNG image bytes of the highlighted page, or None on failure.
@@ -810,10 +997,18 @@ def render_page_with_image_highlight(pdf_bytes, page_num, xref):
         doc  = fitz.open(stream=pdf_bytes, filetype="pdf")
         page = doc[page_num]
 
-        # Get the bounding box of this image on the page.
-        # get_image_rects() returns a list of fitz.Rect objects — one per
+        # Determine the highlight rectangle(s).
+        # For PyMuPDF images: get_image_rects() returns one fitz.Rect per
         # location where this xref appears on the page.
-        rects = page.get_image_rects(xref)
+        # For Docling images: the bbox is already in PDF point space — wrap
+        # it in a list to match the same iteration pattern below.
+        if bbox is not None:
+            x0, y0, x1, y1 = bbox
+            rects = [fitz.Rect(x0, y0, x1, y1)]
+        elif xref is not None:
+            rects = page.get_image_rects(xref)
+        else:
+            rects = []
 
         # Render the page at 150 DPI.
         # 150/72 ≈ 2.08 — a good balance between clarity and speed.
@@ -877,6 +1072,66 @@ def extract_image_from_pdf(pdf_bytes, xref):
     except Exception:
         pass
     return None, None
+
+
+def extract_image_by_source(pdf_bytes, img_meta):
+    """
+    Extract image bytes for an image that may be either a PyMuPDF XObject
+    or a Docling PICTURE region.
+
+    Dispatches on img_meta["source"]:
+      "pymupdf" — delegates to extract_image_from_pdf() using img_meta["xref"]
+      "docling"  — renders the page at 300 DPI and crops to img_meta["bbox"]
+
+    Parameters:
+        pdf_bytes (bytes): Current working copy of the PDF.
+        img_meta  (dict):  Image metadata dict from analyze_pdf().
+
+    Returns:
+        (bytes, str): Image bytes and extension ("png"), or (None, None) on failure.
+    """
+    source = img_meta.get("source", "pymupdf")
+
+    if source == "pymupdf":
+        # Standard path: extract the embedded XObject directly.
+        return extract_image_from_pdf(pdf_bytes, img_meta["xref"])
+
+    # Docling path: render the page and crop at the stored bounding box.
+    # bbox is (x0, y0, x1, y1) in PDF points, TOPLEFT origin — ready to scale.
+    try:
+        bbox    = img_meta.get("bbox")
+        page_no = img_meta.get("page")   # 1-based
+        if bbox is None or page_no is None:
+            return None, None
+
+        x0, y0, x1, y1 = bbox
+
+        doc   = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page  = doc[page_no - 1]
+        dpi   = 300
+        scale = dpi / 72
+        mat   = fitz.Matrix(scale, scale)
+        pix   = page.get_pixmap(matrix=mat)
+        doc.close()
+
+        img_full = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+
+        # Scale bbox from PDF points to pixel space.
+        left   = max(0,             int(x0 * scale))
+        top    = max(0,             int(y0 * scale))
+        right  = min(img_full.width,  int(x1 * scale))
+        bottom = min(img_full.height, int(y1 * scale))
+
+        if right <= left or bottom <= top:
+            return None, None
+
+        cropped = img_full.crop((left, top, right, bottom))
+        out = io.BytesIO()
+        cropped.save(out, format="PNG")
+        return out.getvalue(), "png"
+
+    except Exception:
+        return None, None
 
 
 # =============================================================================
@@ -1627,14 +1882,68 @@ def analyze_pdf(file_bytes):
                 })
 
         # --- CONTENT CHECK: Images without alt text (Red) ---
-        # PyMuPDF's page.get_images() returns a list of image references for
-        # every image rendered on the page. If any images are found anywhere
-        # in the document, we flag this issue.
+        # We collect images from two sources and merge them into one list:
+        #
+        #   PyMuPDF XObjects — page.get_images() returns every embedded image
+        #   that lives as its own PDF object. Works well for digital PDFs.
+        #
+        #   Docling PICTURE regions — Docling's ML vision model analyses rendered
+        #   pixels and detects image regions even when they are not separate XObjects.
+        #   This covers scanned PDFs where a content image (figure, photo, diagram)
+        #   is a pixel region inside a full-page background scan rather than a
+        #   standalone XObject. PyMuPDF cannot see these; Docling can.
+        #
+        # Each image dict carries:
+        #   "page"    — 1-based page number
+        #   "xref"    — int xref for pymupdf images; None for docling images
+        #   "img_key" — hashable dict key used throughout the alt text workflow
+        #               (xref int for pymupdf; "docling_{page}_{x0}_{y0}" string for docling)
+        #   "source"  — "pymupdf" or "docling"
+        #   "bbox"    — (x0, y0, x1, y1) in PDF points, TOPLEFT origin
+        #               (only present for docling images; pymupdf uses xref for bbox lookup)
         images = []
         for page_num, page in enumerate(doc):
             for img in page.get_images(full=True):
                 xref = img[0]
-                images.append({"page": page_num + 1, "xref": xref})
+                images.append({
+                    "page": page_num + 1,
+                    "xref": xref,
+                    "img_key": xref,        # int — used as dict key in alt text workflow
+                    "source": "pymupdf",
+                })
+
+        # Merge Docling PICTURE detections.
+        # Only runs when Docling succeeded (docling_doc is not None).
+        # The bbox conversion from BOTTOMLEFT (Docling default) to TOPLEFT
+        # (PyMuPDF rendering convention) uses to_top_left_origin(page_height).
+        if docling_doc is not None:
+            try:
+                for item, _ in docling_doc.iterate_items():
+                    if not hasattr(item, "label") or item.label != DocItemLabel.PICTURE:
+                        continue
+                    if not item.prov:
+                        continue
+                    prov    = item.prov[0]
+                    page_no = prov.page_no   # 1-based
+                    try:
+                        page_height = docling_doc.pages[page_no].size.height
+                        tl          = prov.bbox.to_top_left_origin(page_height)
+                        x0 = round(tl.l, 2)
+                        y0 = round(tl.t, 2)
+                        x1 = round(tl.r, 2)
+                        y1 = round(tl.b, 2)
+                    except Exception:
+                        continue   # Can't compute bbox — skip this item
+                    img_key = f"docling_{page_no}_{int(x0)}_{int(y0)}"
+                    images.append({
+                        "page":    page_no,
+                        "xref":    None,     # No PDF xref — Docling region, not XObject
+                        "img_key": img_key,  # string key — avoids int collision with xrefs
+                        "source":  "docling",
+                        "bbox":    (x0, y0, x1, y1),
+                    })
+            except Exception:
+                pass  # Docling iteration failure must never break image detection
 
         if images:
             count = len(images)
@@ -1713,6 +2022,18 @@ def build_docx_from_pdf(pdf_bytes):
     # ------------------------------------------------------------------
     docling_doc = st.session_state.get("docling_doc")
 
+    # ------------------------------------------------------------------
+    # Shared setup for both paths: read alt text results once so both
+    # the Docling path and the PyMuPDF fallback can use the same data.
+    # ------------------------------------------------------------------
+    alt_results   = st.session_state.get("alt_text_results", {})
+    alt_images    = st.session_state.get("alt_text_images", [])
+
+    # Types whose images should be excluded from the output entirely.
+    REMOVED_TYPES     = {"artifact", "background", "edge_artifact"}
+    # Types whose images carry an approved description worth writing out.
+    INFORMATIONAL_TYPES = {"critical", "supplementary"}
+
     if docling_doc is not None:
         try:
             # Build exclusion data from alt_text_results so we can skip artifact/
@@ -1722,20 +2043,40 @@ def build_docx_from_pdf(pdf_bytes):
             # Instead we exclude pages where EVERY image has been marked for removal.
             # Pages with at least one non-removed image still get placeholders for
             # all their pictures (we can't tell which Docling item maps to which xref).
-            alt_results   = st.session_state.get("alt_text_results", {})
-            alt_images    = st.session_state.get("alt_text_images", [])
-            REMOVED_TYPES = {"artifact", "background", "edge_artifact"}
 
-            # Group xrefs by page (1-based page numbers from fix_data).
-            xrefs_by_page: dict[int, set] = {}
+            # Group img_keys by page (1-based page numbers from fix_data).
+            # Uses img_key (not xref) as the identifier so Docling images — which
+            # have xref=None — are correctly tracked alongside PyMuPDF images.
+            keys_by_page: dict[int, set] = {}
             for img_meta in alt_images:
-                xrefs_by_page.setdefault(img_meta["page"], set()).add(img_meta["xref"])
+                k = img_meta.get("img_key", img_meta.get("xref"))
+                keys_by_page.setdefault(img_meta["page"], set()).add(k)
 
-            # A page is fully excluded only if every xref on it is marked for removal.
+            # A page is fully excluded only if every image on it is marked for removal.
             fully_excluded_pages = {
-                pg for pg, xrefs in xrefs_by_page.items()
-                if all(alt_results.get(x, {}).get("type") in REMOVED_TYPES for x in xrefs)
+                pg for pg, keys in keys_by_page.items()
+                if all(alt_results.get(k, {}).get("type") in REMOVED_TYPES for k in keys)
             }
+
+            # Build a page → [approved descriptions] mapping for informational images.
+            # Docling PICTURE items have a page number but no xref, so we group
+            # approved descriptions by page and consume them in order as PICTURE
+            # items are encountered during iterate_items().
+            #
+            # Why a list per page? A page can have multiple informational images.
+            # Popping from the front (index 0) preserves the xref order from the
+            # alt text workflow, which follows reading order left-to-right, top-to-bottom.
+            descriptions_by_page: dict[int, list[str]] = {}
+            for xref, entry in alt_results.items():
+                if (
+                    entry.get("type") in INFORMATIONAL_TYPES
+                    and entry.get("alt_text", "").strip()
+                ):
+                    pg = entry.get("page")
+                    if pg is not None:
+                        descriptions_by_page.setdefault(pg, []).append(
+                            entry["alt_text"].strip()
+                        )
 
             # iterate_items() walks the document in reading order and yields
             # (item, level) tuples. The level is nesting depth, not heading level.
@@ -1779,8 +2120,25 @@ def build_docx_from_pdf(pdf_bytes):
                     item_page = item.prov[0].page_no if item.prov else None
                     if item_page in fully_excluded_pages:
                         continue
+
                     page_num = item_page or "?"
-                    doc_out.add_paragraph(f"[Image — page {page_num} of original PDF]")
+
+                    # Look up an approved description for this page.
+                    # Pop from the front so each PICTURE item on the same page
+                    # gets its own unique description rather than the same one repeated.
+                    page_descs = descriptions_by_page.get(item_page, [])
+                    if page_descs:
+                        approved_text = page_descs.pop(0)
+                        # Write the description as the alt text for this image.
+                        # Format: "[Image, page N: <approved description>]"
+                        # This makes the description visible and searchable in Word,
+                        # satisfying WCAG 2.1 SC 1.1.1 for documents that will be
+                        # re-exported to PDF.
+                        doc_out.add_paragraph(
+                            f"[Image, page {page_num}: {approved_text}]"
+                        )
+                    else:
+                        doc_out.add_paragraph(f"[Image — page {page_num} of original PDF]")
 
                 elif label in (DocItemLabel.TEXT, DocItemLabel.PARAGRAPH):
                     # Standard body text paragraph.
@@ -1815,6 +2173,12 @@ def build_docx_from_pdf(pdf_bytes):
     # ------------------------------------------------------------------
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        # Build a flat img_key → alt_text_results entry lookup.
+        # alt_results may contain both int keys (pymupdf xrefs) and string keys
+        # (docling img_keys). Only int keys correspond to XObjects accessible via
+        # page.get_images(); string keys are filtered out in the per-image loop.
+        xref_to_entry = {k: entry for k, entry in alt_results.items()}
 
         # Determine body text size by finding the most frequently used font size.
         all_sizes = []
@@ -1855,6 +2219,49 @@ def build_docx_from_pdf(pdf_bytes):
                         doc_out.add_heading(line_text, level=2)
                     else:
                         doc_out.add_paragraph(line_text)
+
+            # ----------------------------------------------------------
+            # After text blocks: emit alt text for images on this page.
+            # page.get_images(full=True) returns one tuple per image XObject,
+            # with the xref at index 0 — the same key used in alt_text_results.
+            #
+            # This adds image descriptions at the end of each page's content.
+            # Inline positioning is not possible with the font-size heuristic
+            # path, but all approved descriptions are preserved in the output.
+            # ----------------------------------------------------------
+            for img in page.get_images(full=True):
+                xref  = img[0]
+                entry = xref_to_entry.get(xref, {})
+                img_type = entry.get("type", "")
+
+                if img_type in REMOVED_TYPES:
+                    # Artifact, background, or edge artifact — skip entirely.
+                    continue
+
+                if img_type == "decorative":
+                    # Decorative images get empty alt text in the final PDF.
+                    # No visible placeholder is needed in the Word document.
+                    continue
+
+                alt_text = entry.get("alt_text", "").strip()
+
+                if alt_text:
+                    # Approved description from the alt text workflow.
+                    # Format matches the Docling path for consistency.
+                    doc_out.add_paragraph(
+                        f"[Image, page {page_num + 1}: {alt_text}]"
+                    )
+                elif img_type in INFORMATIONAL_TYPES:
+                    # Image was classified as informational but description
+                    # was not saved (e.g., the workflow was abandoned mid-way).
+                    doc_out.add_paragraph(
+                        f"[Image, page {page_num + 1}: description not provided]"
+                    )
+                else:
+                    # Image was never reviewed — generic placeholder.
+                    doc_out.add_paragraph(
+                        f"[Image — page {page_num + 1} of original PDF]"
+                    )
 
         doc.close()
 
@@ -2030,6 +2437,16 @@ def render_upload():
 
     if not copyright_acknowledged:
         st.caption("Please check the box above to enable file upload.")
+    else:
+        # Processing time notice — shown once the uploader is enabled so faculty
+        # know upfront that analysis can take a few minutes for larger files.
+        # st.caption() renders in smaller, muted text — appropriate for a
+        # supplementary note that shouldn't compete with the uploader itself.
+        st.caption(
+            "Once you upload your file, it may take a few minutes to analyze "
+            "depending on its size. Large files can take 5 minutes or more. "
+            "Please be patient — the tool is working."
+        )
 
     if uploaded_file is not None and copyright_acknowledged:
         # Store the file name and raw bytes in session state so we can
@@ -2055,6 +2472,24 @@ def render_analyzing():
     """
     st.title("♿ PDF Assistant")
     st.divider()
+
+    # ------------------------------------------------------------------
+    # Preflight check — verify the temp directory is writable before
+    # Docling tries to create its temporary PDF there.
+    # Tesseract is not needed for analysis, so tesseract_path is omitted.
+    # ------------------------------------------------------------------
+    preflight = preflight_check(
+        output_paths=[tempfile.gettempdir()],
+    )
+    if not preflight["ok"]:
+        st.error(
+            "🔴 **Setup issue — cannot start analysis.**\n\n"
+            + "\n\n".join(preflight["errors"])
+        )
+        if st.button("← Go back", type="primary"):
+            st.session_state.step = "upload"
+            st.rerun()
+        return
 
     with st.spinner(f"Analyzing **{st.session_state.file_name}** — just a moment..."):
         result = analyze_pdf(st.session_state.file_bytes)
@@ -2363,6 +2798,26 @@ def render_running_ocr():
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
     )
 
+    # ------------------------------------------------------------------
+    # Preflight check — confirm Tesseract is callable and the temp
+    # directory is writable before starting the OCR pipeline.
+    # Catching these problems here gives the user a clear, actionable
+    # error rather than a cryptic traceback mid-conversion.
+    # ------------------------------------------------------------------
+    preflight = preflight_check(
+        tesseract_path=tesseract_path,
+        output_paths=[tempfile.gettempdir()],
+    )
+    if not preflight["ok"]:
+        st.error(
+            "🔴 **Setup issue — cannot start OCR.**\n\n"
+            + "\n\n".join(preflight["errors"])
+        )
+        if st.button("← Go back", type="primary"):
+            st.session_state.step = "scanned_doc"
+            st.rerun()
+        return
+
     preprocess_error = None
     ocr_error        = None
 
@@ -2479,6 +2934,32 @@ def render_running_easyocr():
     st.title("♿ PDF Assistant")
     st.divider()
 
+    # Read the Tesseract path before the spinner so preflight can check it.
+    tesseract_path = st.session_state.get(
+        "tesseract_path",
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    )
+
+    # ------------------------------------------------------------------
+    # Preflight check — Tesseract is needed for preprocessing even though
+    # EasyOCR handles the final text extraction. preprocess_pages() calls
+    # pytesseract.image_to_osd() for orientation detection, which requires
+    # the Tesseract binary to be present and callable.
+    # ------------------------------------------------------------------
+    preflight = preflight_check(
+        tesseract_path=tesseract_path,
+        output_paths=[tempfile.gettempdir()],
+    )
+    if not preflight["ok"]:
+        st.error(
+            "🔴 **Setup issue — cannot start enhanced OCR.**\n\n"
+            + "\n\n".join(preflight["errors"])
+        )
+        if st.button("← Go back", type="primary"):
+            st.session_state.step = "ocr_format_select"
+            st.rerun()
+        return
+
     easyocr_error = None
 
     with st.spinner(
@@ -2486,11 +2967,6 @@ def render_running_easyocr():
         "longer documents. Hang tight..."
     ):
         try:
-            tesseract_path = st.session_state.get(
-                "tesseract_path",
-                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            )
-
             # Re-run preprocessing to get corrected images.
             # The preprocessing log from the Tesseract pass is already stored
             # — we keep those entries and only update the OCR-specific lines.
@@ -3007,7 +3483,7 @@ def _render_abandon_button():
         st.rerun()
 
 
-def _render_image_nav_buttons(index, total, xref, current, results):
+def _render_image_nav_buttons(index, total, img_key, current, results):
     """
     Render the three navigation buttons shown at the bottom of every per-image
     phase: Previous, Skip, and Stop.
@@ -3021,11 +3497,12 @@ def _render_image_nav_buttons(index, total, xref, current, results):
       remain. Any unclassified images will be visible there.
 
     Parameters:
-        index   (int): 0-based index of the current image.
-        total   (int): Total number of images in the workflow.
-        xref    (int): xref of the current image (used to clear partial results).
-        current (dict): The current image's metadata dict.
-        results (dict): The live alt_text_results dict from session state.
+        index   (int):        0-based index of the current image.
+        total   (int):        Total number of images in the workflow.
+        img_key (int|str):    Key identifying the current image in alt_text_results.
+                              An int xref for pymupdf images; a string for docling images.
+        current (dict):       The current image's metadata dict.
+        results (dict):       The live alt_text_results dict from session state.
     """
     st.divider()
     nav_cols = st.columns(3)
@@ -3040,7 +3517,7 @@ def _render_image_nav_buttons(index, total, xref, current, results):
             ):
                 # Clear any partial answer for the current image so it starts
                 # fresh when the faculty member returns to it.
-                results.pop(xref, None)
+                results.pop(img_key, None)
                 st.session_state.alt_text_results = results
                 st.session_state.alt_text_index = index - 1
                 st.session_state.alt_text_phase = "question_1"
@@ -3053,7 +3530,7 @@ def _render_image_nav_buttons(index, total, xref, current, results):
             key=f"nav_skip_{index}",
         ):
             # Record as skipped so the summary can flag it.
-            results[xref] = {
+            results[img_key] = {
                 "type": "skipped",
                 "severity": "green",
                 "alt_text": "",
@@ -3124,8 +3601,9 @@ def render_image_alt_text():
 
         # Decide next phase: bulk_review if any high-confidence non-content detections
         # exist, otherwise go straight to per-image question_1.
+        # classifications is keyed by img_key (int for pymupdf, str for docling).
         flagged = [
-            xref for xref, r in classifications.items()
+            img_key for img_key, r in classifications.items()
             if r["classification"] != "content" and r["confidence"] >= HIGH_CONFIDENCE
         ]
         if flagged:
@@ -3141,17 +3619,17 @@ def render_image_alt_text():
     if phase == "bulk_review":
         flagged_images = [
             img for img in images
-            if auto_classifications.get(img["xref"], {}).get("classification") != "content"
-            and auto_classifications.get(img["xref"], {}).get("confidence", 0) >= HIGH_CONFIDENCE
+            if auto_classifications.get(img["img_key"], {}).get("classification") != "content"
+            and auto_classifications.get(img["img_key"], {}).get("confidence", 0) >= HIGH_CONFIDENCE
         ]
 
         n = len(flagged_images)
         bg_count  = sum(1 for img in flagged_images
-                        if auto_classifications[img["xref"]]["classification"] == "background")
+                        if auto_classifications[img["img_key"]]["classification"] == "background")
         ea_count  = sum(1 for img in flagged_images
-                        if auto_classifications[img["xref"]]["classification"] == "edge_artifact")
+                        if auto_classifications[img["img_key"]]["classification"] == "edge_artifact")
         art_count = sum(1 for img in flagged_images
-                        if auto_classifications[img["xref"]]["classification"] == "artifact")
+                        if auto_classifications[img["img_key"]]["classification"] == "artifact")
 
         # Build a plain-language summary of what was found.
         found_parts = []
@@ -3173,8 +3651,8 @@ def render_image_alt_text():
         # Show thumbnails of flagged images in a 3-column grid.
         cols = st.columns(3)
         for i, img_meta in enumerate(flagged_images):
-            xref        = img_meta["xref"]
-            clf         = auto_classifications[xref]
+            img_key     = img_meta["img_key"]
+            clf         = auto_classifications[img_key]
             label_map   = {
                 "background":   "Page background",
                 "edge_artifact": "Edge artifact",
@@ -3182,7 +3660,7 @@ def render_image_alt_text():
             }
             label = label_map.get(clf["classification"], clf["classification"])
             with cols[i % 3]:
-                img_bytes, _ = extract_image_from_pdf(pdf_source, xref)
+                img_bytes, _ = extract_image_by_source(pdf_source, img_meta)
                 if img_bytes:
                     st.image(img_bytes, use_container_width=True)
                 st.caption(f"**{label}** — page {img_meta['page']}")
@@ -3201,11 +3679,11 @@ def render_image_alt_text():
             ):
                 # Apply removal to all flagged images in alt_text_results.
                 for img_meta in flagged_images:
-                    xref = img_meta["xref"]
-                    clf  = auto_classifications[xref]
+                    img_key = img_meta["img_key"]
+                    clf     = auto_classifications[img_key]
                     # background and edge_artifact both stored as "artifact" type
                     # so build_docx_from_pdf skips them consistently.
-                    results[xref] = {
+                    results[img_key] = {
                         "type": clf["classification"],  # "background", "edge_artifact", or "artifact"
                         "severity": "green",
                         "alt_text": "",
@@ -3214,7 +3692,7 @@ def render_image_alt_text():
                 st.session_state.alt_text_results = results
                 # Advance to first unclassified image, or summary if all done.
                 first_idx = next(
-                    (i for i, img in enumerate(images) if img["xref"] not in results),
+                    (i for i, img in enumerate(images) if img["img_key"] not in results),
                     None,
                 )
                 if first_idx is not None:
@@ -3251,11 +3729,11 @@ def render_image_alt_text():
 
         # Partition images into four groups for the summary.
         REMOVED_TYPES = ("artifact", "background", "edge_artifact")
-        removed      = [img for img in images if results.get(img["xref"], {}).get("type") in REMOVED_TYPES]
-        skipped      = [img for img in images if results.get(img["xref"], {}).get("type") == "skipped"
-                        or img["xref"] not in results]
-        others       = [img for img in images if results.get(img["xref"], {}).get("type")
-                        not in REMOVED_TYPES and results.get(img["xref"], {}).get("type") not in (None, "skipped")]
+        removed      = [img for img in images if results.get(img["img_key"], {}).get("type") in REMOVED_TYPES]
+        skipped      = [img for img in images if results.get(img["img_key"], {}).get("type") == "skipped"
+                        or img["img_key"] not in results]
+        others       = [img for img in images if results.get(img["img_key"], {}).get("type")
+                        not in REMOVED_TYPES and results.get(img["img_key"], {}).get("type") not in (None, "skipped")]
 
         if removed:
             type_label_map = {
@@ -3268,14 +3746,14 @@ def render_image_alt_text():
                 "excluded from the accessible output.**"
             )
             for img in removed:
-                xref    = img["xref"]
-                pg      = results.get(xref, {}).get("page", img.get("page", "?"))
-                kind    = results.get(xref, {}).get("type", "artifact")
+                img_key = img["img_key"]
+                pg      = results.get(img_key, {}).get("page", img.get("page", "?"))
+                kind    = results.get(img_key, {}).get("type", "artifact")
                 label   = type_label_map.get(kind, "Removed image")
                 with st.expander(f"Page {pg} — {label} (will be excluded)", expanded=False):
-                    img_bytes, _ = extract_image_from_pdf(
+                    img_bytes, _ = extract_image_by_source(
                         st.session_state.working_pdf_bytes or st.session_state.file_bytes,
-                        xref,
+                        img,
                     )
                     if img_bytes:
                         st.image(img_bytes, width=300)
@@ -3289,12 +3767,11 @@ def render_image_alt_text():
                 "You can confirm anyway or go back to classify them."
             )
             for img in skipped:
-                xref = img["xref"]
                 pg   = img.get("page", "?")
                 with st.expander(f"Page {pg} — Not classified", expanded=False):
-                    img_bytes, _ = extract_image_from_pdf(
+                    img_bytes, _ = extract_image_by_source(
                         st.session_state.working_pdf_bytes or st.session_state.file_bytes,
-                        xref,
+                        img,
                     )
                     if img_bytes:
                         st.image(img_bytes, width=300)
@@ -3302,19 +3779,19 @@ def render_image_alt_text():
             st.divider()
 
         for img in others:
-            xref   = img["xref"]
-            result = results.get(xref, {})
-            pg     = result.get("page", img.get("page", "?"))
-            sev    = result.get("severity", "")
-            label  = SEVERITY_LABELS.get(sev, "")
-            kind   = result.get("type", "")
-            alt    = result.get("alt_text", "")
+            img_key = img["img_key"]
+            result  = results.get(img_key, {})
+            pg      = result.get("page", img.get("page", "?"))
+            sev     = result.get("severity", "")
+            label   = SEVERITY_LABELS.get(sev, "")
+            kind    = result.get("type", "")
+            alt     = result.get("alt_text", "")
 
             header = f"Page {pg} — {label}"
             with st.expander(header, expanded=False):
-                img_bytes, _ = extract_image_from_pdf(
+                img_bytes, _ = extract_image_by_source(
                     st.session_state.working_pdf_bytes or st.session_state.file_bytes,
-                    xref,
+                    img,
                 )
                 if img_bytes:
                     st.image(img_bytes, width=300)
@@ -3377,7 +3854,7 @@ def render_image_alt_text():
     # PER-IMAGE HEADER — progress indicator and image previews
     # -------------------------------------------------------------------------
     current  = images[index]
-    xref     = current["xref"]
+    img_key  = current["img_key"]
     page_num = current["page"] - 1  # convert 1-based page number to 0-based index
 
     st.markdown(f"**Image {index + 1} of {total}** — found on page {current['page']}")
@@ -3389,7 +3866,15 @@ def render_image_alt_text():
     # --- Panel 1: Page context view with red highlight ---
     # Shows the full page so faculty can see exactly which image is being assessed.
     # Critical when a page has multiple images or when the extracted crop is ambiguous.
-    page_view = render_page_with_image_highlight(pdf_source, page_num, xref)
+    # Branch on source: pymupdf images use xref, docling images use bbox.
+    if current.get("source") == "docling":
+        page_view = render_page_with_image_highlight(
+            pdf_source, page_num, bbox=current.get("bbox")
+        )
+    else:
+        page_view = render_page_with_image_highlight(
+            pdf_source, page_num, xref=current.get("xref")
+        )
     if page_view:
         st.caption("📍 The image being assessed is highlighted in red:")
         st.image(page_view, use_container_width=True)
@@ -3397,7 +3882,7 @@ def render_image_alt_text():
 
     # --- Panel 2: Extracted image at fixed width ---
     # Clean crop of the image alone — easier to read the content in detail.
-    img_bytes, _ = extract_image_from_pdf(pdf_source, xref)
+    img_bytes, _ = extract_image_by_source(pdf_source, current)
     if img_bytes:
         st.caption("🖼 Extracted image:")
         st.image(img_bytes, width=500)
@@ -3419,7 +3904,7 @@ def render_image_alt_text():
         # Auto-classification suggestion badge — shown when confidence is below
         # the HIGH_CONFIDENCE threshold (those were handled in bulk_review) but
         # still meaningfully non-"content". We show all non-content suggestions here.
-        clf = auto_classifications.get(xref, {})
+        clf = auto_classifications.get(img_key, {})
         if clf.get("classification") and clf["classification"] != "content":
             label_map = {
                 "background":    "a page background",
@@ -3452,7 +3937,7 @@ def render_image_alt_text():
                 key=f"q1_decorative_{index}",
             ):
                 # Decorative → Green, empty alt text. No further review needed.
-                results[xref] = {
+                results[img_key] = {
                     "type": "decorative",
                     "severity": "green",
                     "alt_text": "",
@@ -3474,7 +3959,7 @@ def render_image_alt_text():
             ):
                 # Artifact → Green, excluded from DOCX output.
                 # The PDF working copy is not modified — exclusion applies at build time.
-                results[xref] = {
+                results[img_key] = {
                     "type": "artifact",
                     "severity": "green",
                     "alt_text": "",
@@ -3497,7 +3982,7 @@ def render_image_alt_text():
                 st.session_state.alt_text_phase = "question_2"
                 st.rerun()
 
-        _render_image_nav_buttons(index, total, xref, current, results)
+        _render_image_nav_buttons(index, total, img_key, current, results)
 
     # -------------------------------------------------------------------------
     # QUESTION 2 — Is it critical to understanding?
@@ -3520,7 +4005,7 @@ def render_image_alt_text():
                 key=f"q2_yes_{index}",
             ):
                 # Critical → stays Red, full description required.
-                results[xref] = {
+                results[img_key] = {
                     "type": "critical",
                     "severity": "red",
                     "alt_text": "",
@@ -3537,7 +4022,7 @@ def render_image_alt_text():
                 key=f"q2_no_{index}",
             ):
                 # Non-critical → downgraded to Yellow, brief description needed.
-                results[xref] = {
+                results[img_key] = {
                     "type": "supplementary",
                     "severity": "yellow",
                     "alt_text": "",
@@ -3557,7 +4042,7 @@ def render_image_alt_text():
             st.session_state.alt_text_phase = "question_1"
             st.rerun()
 
-        _render_image_nav_buttons(index, total, xref, current, results)
+        _render_image_nav_buttons(index, total, img_key, current, results)
 
     # -------------------------------------------------------------------------
     # ENTER TEXT — write the alt text description
@@ -3565,7 +4050,7 @@ def render_image_alt_text():
     # review, edit, or approve it before it is applied.
     # -------------------------------------------------------------------------
     elif phase == "enter_text":
-        result   = results.get(xref, {})
+        result   = results.get(img_key, {})
         severity = result.get("severity", "red")
         existing = result.get("alt_text", "")
 
@@ -3602,7 +4087,7 @@ def render_image_alt_text():
                 key=f"alt_save_{index}",
             ):
                 if new_text.strip():
-                    results[xref]["alt_text"] = new_text.strip()
+                    results[img_key]["alt_text"] = new_text.strip()
                     st.session_state.alt_text_results = results
                     _advance_alt_text_image()
                 else:
@@ -3617,7 +4102,7 @@ def render_image_alt_text():
                 st.session_state.alt_text_phase = "question_2"
                 st.rerun()
 
-        _render_image_nav_buttons(index, total, xref, current, results)
+        _render_image_nav_buttons(index, total, img_key, current, results)
         _render_abandon_button()
 
 
