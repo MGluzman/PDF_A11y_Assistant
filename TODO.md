@@ -68,6 +68,35 @@ be used where relevant — especially for reading order and list tagging.
 
 ---
 
+### 8. Manual Review Checklist screen
+Some accessibility issues cannot be detected algorithmically — they require a
+human eye to evaluate. These are real WCAG 2.1 / Title II problems that the app
+should surface, even if it can't fix them automatically.
+
+**What to build:** A new workflow screen shown after all auto-detected issues are
+resolved (or when the user says "I'm done"), positioned before the download screen.
+Presents a structured checklist of manually-verifiable items with:
+- Plain-language explanation of what to look for and why it matters
+- "Looks fine" / "Needs attention" choice for each item
+- Items marked "Needs attention" provide specific guidance on how to address them
+- User can skip the whole screen if they choose
+
+**Issues to include:**
+
+| Issue | Severity | What to check |
+|-------|----------|---------------|
+| Charts, graphs, and diagrams | 🔴 Critical | Does the alt text describe the *data and meaning*, not just the visual appearance? A bar chart description should say what the bars represent and what the key takeaway is. |
+| Embedded video or audio | 🔴 Critical | Is there a transcript or caption file? Can a student who can't hear the audio still access the content? |
+| Math and equations | 🔴 Critical | Are equations image-based (unreadable) or text-based? Even text-based math notation (x², ∑) may not read correctly in all screen readers. |
+| Color as only cue for meaning | 🟡 Moderate | Is color used to signal something (required fields, categories, warnings) without any other indicator — label, symbol, or text? |
+| Non-descriptive link text | 🟡 Moderate | Do any links say "click here," "this link," or "read more" without context? Screen readers read link text in isolation. |
+| Table structure correctness | 🟡 Moderate | Are header cells actually marked as headers, or just visually bold? Does the table read logically row by row without visual layout as a cue? |
+| Abbreviations on first use | 🟢 Lower priority | Are acronyms and discipline-specific abbreviations spelled out the first time they appear? (e.g., "CUNY — City University of New York") |
+| Non-English passages | 🟢 Lower priority | Does the document include quotes or passages in another language? Those sections should have their own language tag so screen readers switch pronunciation rules. |
+| Decorative image verification | 🟢 Lower priority | Review any images the app auto-classified as decorative or removed as artifacts — confirm no content image was accidentally excluded. |
+
+---
+
 ### ~~7. Add upload processing time disclaimer~~ ✅ Done 2026-04-16
 
 ---
