@@ -1576,15 +1576,44 @@ def apply_fix_heading_hierarchy(working_bytes, fix_data):
     )
 
 
+def apply_fix_readability_barrier(working_bytes, fix_data):
+    """
+    Handle severe and moderate readability barrier issues (font size too small).
+
+    Like the untagged PDF and heading hierarchy fixes, this cannot be corrected
+    in the original PDF bytes at runtime — changing font sizes requires
+    rewriting page content streams, which is beyond safe in-place editing.
+
+    The fix manifests in the DOCX output path: build_docx_from_pdf() enforces
+    a minimum font size so all body text is at least 9pt in the Word document.
+    Faculty can then re-export from Word as a properly readable PDF.
+
+    Parameters:
+        working_bytes (bytes): Current working copy of the PDF.
+        fix_data (dict): Contains pct_affected, small_chars, total_chars.
+
+    Returns:
+        (bytes, str): Unchanged PDF bytes and an explanatory message.
+    """
+    pct = fix_data.get("pct_affected", 0)
+    return working_bytes, (
+        f"Noted — {pct}% of your text is below 9pt. When you download your file "
+        "as a Word document, all text will be brought up to a comfortable minimum "
+        "size. Re-exporting that Word file as PDF will carry the correction through."
+    )
+
+
 # Dispatch table: maps issue ID → fix function.
 # Used by render_resolving_issue() to apply the right fix after faculty confirms.
 FIX_DISPATCH = {
-    "missing_title":       apply_fix_missing_title,
-    "missing_lang":        apply_fix_missing_lang,
-    "missing_bookmarks":   apply_fix_bookmarks,
-    "untagged_pdf":        apply_fix_untagged,
-    "missing_alt_text":    apply_fix_alt_text,
-    "heading_hierarchy":   apply_fix_heading_hierarchy,
+    "missing_title":                apply_fix_missing_title,
+    "missing_lang":                 apply_fix_missing_lang,
+    "missing_bookmarks":            apply_fix_bookmarks,
+    "untagged_pdf":                 apply_fix_untagged,
+    "missing_alt_text":             apply_fix_alt_text,
+    "heading_hierarchy":            apply_fix_heading_hierarchy,
+    "readability_barrier_severe":   apply_fix_readability_barrier,
+    "readability_barrier_moderate": apply_fix_readability_barrier,
 }
 
 
@@ -1967,6 +1996,72 @@ def analyze_pdf(file_bytes):
                 "fix_data": {"images": images},
             })
 
+        # --- CONTENT CHECK: Readability barrier — font size too small ---
+        # Iterate all text spans and count characters whose font size falls
+        # below 9pt, which is the practical minimum for sustained body reading.
+        # Spans shorter than 3 characters are excluded to avoid flagging page
+        # numbers, footnote markers, and other incidental small text.
+        # Percentage of affected content drives severity:
+        #   > 25% of total text → Red (severe barrier)
+        #   1–25%              → Yellow (moderate barrier)
+        SMALL_FONT_PT = 9.0
+        total_chars   = 0
+        small_chars   = 0
+
+        for page in doc:
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text = span.get("text", "").strip()
+                        size = span.get("size", 0)
+                        if len(text) < 3:
+                            continue
+                        total_chars += len(text)
+                        if size < SMALL_FONT_PT:
+                            small_chars += len(text)
+
+        if total_chars > 0 and small_chars > 0:
+            pct = (small_chars / total_chars) * 100
+            if pct > 25:
+                rb_id       = "readability_barrier_severe"
+                rb_severity = "red"
+                rb_title    = "Severe readability barrier — text too small"
+                rb_desc     = (
+                    f"More than a quarter of your document's text ({pct:.0f}%) uses a "
+                    "font size below 9pt, which is too small for many readers. Students "
+                    "with low vision, reading difficulties, or aging eyes may struggle "
+                    "to read this content without significant zooming."
+                )
+            else:
+                rb_id       = "readability_barrier_moderate"
+                rb_severity = "yellow"
+                rb_title    = "Moderate readability barrier — some text too small"
+                rb_desc     = (
+                    f"About {pct:.0f}% of your document's text uses a font size below "
+                    "9pt. While this affects a smaller portion of the content, it still "
+                    "creates barriers for students with low vision or reading difficulties."
+                )
+
+            issues.append({
+                "id":          rb_id,
+                "severity":    rb_severity,
+                "title":       rb_title,
+                "description": rb_desc,
+                "wcag":        "WCAG 2.1 SC 1.4.3, 1.4.6 — Contrast (Minimum/Enhanced)",
+                "ada":         "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    "When you download your file as a Word document, I'll apply a "
+                    "minimum font size so all body text is comfortably readable."
+                ),
+                "fix_data": {
+                    "pct_affected": round(pct, 1),
+                    "small_chars":  small_chars,
+                    "total_chars":  total_chars,
+                },
+            })
+
         doc.close()
 
     except Exception:
@@ -2291,6 +2386,9 @@ def init_state():
         "file_bytes": None,         # Raw bytes of the uploaded file
         "issues": [],               # Full list of issue dicts from analysis
         "resolved_ids": [],         # List of issue IDs the user has resolved
+        "skipped_ids": [],          # Issue IDs the user explicitly skipped via the alternative path
+        "showing_alternative": False,  # True when the post-rejection alternative UI is active
+        "ocr_download_mode": False,    # True when user chose "download and review first" on OCR screen
         "resolved_count": 0,        # Running count of resolved issues (drives re-analysis)
         "current_issue_id": None,   # ID of the issue currently being worked on
         "proposed_fix": None,       # Text of the fix shown during QA confirmation
@@ -3037,17 +3135,19 @@ def render_running_easyocr():
 # -----------------------------------------------------------------------------
 def render_ocr_format_select():
     """
-    Purpose: Let the user download their OCR-converted file and choose next steps.
+    Purpose: Show OCR quality results, ask whether the faculty member is happy,
+    then either advance to accessibility analysis or offer a download to review.
 
-    The DOCX and PDF bytes were prebuilt in render_running_ocr() and stored in
-    session_state. This screen serves them via st.download_button — no re-processing.
+    Flow per CLAUDE.md OCR Step 7:
+      1. Show quality score, processing log, and text preview.
+      2. Show what accessibility issues were found.
+      3. Ask: "Are you happy with this result?" — three choices:
+           a. Yes, let's keep going      → proceed to issue list (no download required)
+           b. Download and review first  → show download buttons, then re-ask
+           c. No, I want to stop         → done screen
+      Downloads are always available at the end via render_choose_format().
 
     File naming per CLAUDE.md: original name + '_readable' before the extension.
-      Example: lecture_notes.pdf → lecture_notes_readable.docx or .pdf
-
-    After downloading, the user chooses:
-      - Yes, let's keep going → proceed to the issue list for accessibility analysis
-      - No, I'm done for now  → end the session (done_reason = "ocr_exit")
     """
     st.title("♿ PDF Assistant")
     st.divider()
@@ -3057,10 +3157,8 @@ def render_ocr_format_select():
 
     # -------------------------------------------------------------------------
     # BUILD OUTPUT FILES — lazy, cached
-    # DOCX and PDF are built here on first render (or after EasyOCR clears them)
-    # rather than in the OCR runner, so we never build a format the user won't
-    # download. Results are cached in session state and reused on every rerender
-    # of this screen (e.g. when the user scrolls the text preview).
+    # Built on first render so we never process a format the user won't use.
+    # Cached in session state and reused on every rerender of this screen.
     # -------------------------------------------------------------------------
     if not st.session_state.ocr_docx_bytes:
         with st.spinner("Preparing your readable files..."):
@@ -3073,31 +3171,15 @@ def render_ocr_format_select():
     )
 
     # -------------------------------------------------------------------------
-    # PROCESSING SUMMARY — "What we did"
-    # Transparent step-by-step log of every action taken: page count,
-    # orientation corrections, skew corrections, engine used, quality score.
-    # Shown as a collapsed expander so it's available without dominating.
-    # -------------------------------------------------------------------------
-    processing_log = st.session_state.get("ocr_processing_log", [])
-    if processing_log:
-        with st.expander("📋 What we did", expanded=False):
-            for entry in processing_log:
-                st.markdown(entry)
-
-    st.divider()
-
-    # -------------------------------------------------------------------------
-    # OCR QUALITY INDICATOR + TEXT PREVIEW
-    # Show the quality estimate so the faculty member can decide whether to
-    # accept the result or request a second pass with EasyOCR.
+    # QUALITY BADGE
+    # Uses ✅ / ⚠️ / ❌ to stay visually distinct from the red/yellow/green
+    # accessibility severity scheme used elsewhere in the tool.
     # -------------------------------------------------------------------------
     quality_score = st.session_state.get("ocr_quality_score")
     quality_label = st.session_state.get("ocr_quality_label", "Unknown")
     engine_used   = st.session_state.get("ocr_engine_used", "Tesseract")
 
-    # Quality badge — distinct from the red/yellow/green accessibility severity
-    # scheme. Uses ✅ / ⚠️ / ❌ so the two scales are never visually confused.
-    badge = {"Good": "✅", "Fair": "⚠️", "Poor": "❌"}.get(quality_label, "⚪")
+    badge          = {"Good": "✅", "Fair": "⚠️", "Poor": "❌"}.get(quality_label, "⚪")
     engine_display = "Tesseract OCR" if engine_used == "tesseract" else "EasyOCR (enhanced)"
 
     st.markdown(
@@ -3105,33 +3187,42 @@ def render_ocr_format_select():
         f"({quality_score}% word-like tokens) — scanned using {engine_display}"
     )
 
-    # Contextual message explaining what the score means
     if quality_label == "Good":
         st.caption(
-            "The extracted text looks reliable. Review the preview below to "
-            "confirm before downloading."
+            "The extracted text looks reliable. Review the preview below to confirm."
         )
     elif quality_label == "Fair":
         st.caption(
-            "The extraction looks partially readable but some words may be "
-            "inaccurate. Review the preview below — if you see significant "
-            "errors, you can try the enhanced scanner."
+            "The extraction looks partially readable but some words may be inaccurate. "
+            "Review the preview — if you see significant errors, try the enhanced scanner."
         )
     else:
         st.caption(
-            "The extraction quality looks low — the text may contain significant "
-            "errors. Review the preview below and consider trying the enhanced "
-            "scanner for a better result."
+            "The extraction quality looks low — the text may contain significant errors. "
+            "Review the preview and consider trying the enhanced scanner for a better result."
         )
 
-    # Preview expander — always shown so the user can judge for themselves
+    # -------------------------------------------------------------------------
+    # PROCESSING LOG — "What we did"
+    # Transparent step-by-step log: page count, orientation corrections, engine.
+    # Collapsed by default so it's available without dominating the screen.
+    # -------------------------------------------------------------------------
+    processing_log = st.session_state.get("ocr_processing_log", [])
+    if processing_log:
+        with st.expander("📋 What we did", expanded=False):
+            for entry in processing_log:
+                st.markdown(entry)
+
+    # -------------------------------------------------------------------------
+    # TEXT PREVIEW — auto-opens when quality is Fair or Poor
+    # -------------------------------------------------------------------------
     with st.expander(
         f"👁 Preview extracted text ({page_count} page{'s' if page_count != 1 else ''})",
-        expanded=(quality_label in ("Fair", "Poor")),  # auto-open if quality is low
+        expanded=(quality_label in ("Fair", "Poor")),
     ):
         st.caption(
             "This is the text extracted from your scanned document. "
-            "Review it for accuracy before downloading."
+            "Review it for accuracy before deciding how to proceed."
         )
         for i, page_text in enumerate(pages_text):
             st.markdown(f"**Page {i + 1}**")
@@ -3147,9 +3238,7 @@ def render_ocr_format_select():
                 st.divider()
 
     # -------------------------------------------------------------------------
-    # HUMAN-IN-THE-LOOP: offer EasyOCR second pass
-    # Only offered when Tesseract was the engine used (no point re-running
-    # EasyOCR on itself) and quality was not already Good.
+    # EASYOCR UPGRADE — offered when Tesseract was used and quality is not Good
     # -------------------------------------------------------------------------
     if engine_used == "tesseract" and quality_label in ("Fair", "Poor"):
         st.info(
@@ -3157,20 +3246,14 @@ def render_ocr_format_select():
             "scanner (EasyOCR) that handles difficult scans better. It takes a "
             "little longer, but often produces more accurate text."
         )
-        if st.button(
-            "Try the enhanced scanner",
-            use_container_width=True,
-            key="try_easyocr",
-        ):
+        if st.button("Try the enhanced scanner", use_container_width=True, key="try_easyocr"):
             st.session_state.step = "running_easyocr"
             st.rerun()
     elif engine_used == "tesseract" and quality_label == "Good":
-        # Offer EasyOCR optionally even when quality looks good, but don't push it
         with st.expander("Want to try the enhanced scanner anyway?", expanded=False):
             st.caption(
-                "The quality estimate looks good, but automated scoring isn't "
-                "perfect. If you spot errors in the preview, you can still try "
-                "the enhanced scanner."
+                "The quality estimate looks good, but automated scoring isn't perfect. "
+                "If you spot errors in the preview, you can still try the enhanced scanner."
             )
             if st.button(
                 "Try the enhanced scanner",
@@ -3182,61 +3265,13 @@ def render_ocr_format_select():
 
     st.divider()
 
-    st.markdown(
-        "Your converted file is ready to download. Choose a format below — "
-        "I'll save it with **_readable** added to your original file name."
-    )
-
-    # Build the output file names from the original uploaded name.
-    base_name = st.session_state.file_name.replace(".pdf", "").replace(".PDF", "")
-    docx_name = f"{base_name}_readable.docx"
-    pdf_name  = f"{base_name}_readable.pdf"
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Word processor document (DOCX)**")
-        st.caption(
-            "Opens in Microsoft Word, Google Docs, or any compatible application. "
-            "Best if you need to edit the content further before re-publishing."
-        )
-        # st.download_button renders a button that triggers an immediate file download.
-        # We pass the prebuilt bytes directly — no re-processing on click.
-        st.download_button(
-            label=f"⬇ Download {docx_name}",
-            data=st.session_state.ocr_docx_bytes,
-            file_name=docx_name,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            type="primary",
-            use_container_width=True,
-        )
-
-    with col2:
-        st.markdown("**New PDF document**")
-        st.caption(
-            "A text-based PDF ready to share or upload directly. "
-            "Best if you want a finished file."
-        )
-        st.download_button(
-            label=f"⬇ Download {pdf_name}",
-            data=st.session_state.ocr_pdf_bytes,
-            file_name=pdf_name,
-            mime="application/pdf",
-            use_container_width=True,
-        )
-
-    st.divider()
-
-    # Disclaimer acknowledgement — shows the user what was appended to their file.
-    st.caption(f'📄 Note added to your file: "{OCR_DISCLAIMER}"')
-
-    st.divider()
-
-    # Per CLAUDE.md OCR Step 7: present the accessibility analysis results
-    # that were already run inside render_running_ocr(), then ask how to continue.
+    # -------------------------------------------------------------------------
+    # ISSUE SUMMARY — shown before asking how to continue so the faculty member
+    # knows what they're deciding about before committing to a path.
+    # -------------------------------------------------------------------------
     ocr_issues = st.session_state.get("ocr_issues", [])
 
     if ocr_issues:
-        # Count by severity so the summary is meaningful without listing every issue.
         red_count    = sum(1 for i in ocr_issues if i["severity"] == "red")
         yellow_count = sum(1 for i in ocr_issues if i["severity"] == "yellow")
         green_count  = sum(1 for i in ocr_issues if i["severity"] == "green")
@@ -3261,33 +3296,120 @@ def render_ocr_format_select():
             "access this content without barriers."
         )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button(
-            "Yes, let's keep going.",
-            type="primary",
-            use_container_width=True,
-            key="ocr_continue",
-        ):
-            if ocr_issues:
-                # Load the real issues from the OCR analysis into the main
-                # issue workflow. working_pdf_bytes is already set to the
-                # OCR-converted PDF by render_running_ocr().
-                st.session_state.issues = ocr_issues
-                st.session_state.step = "issue_list"
-            else:
-                # No issues found — go to the clean document screen.
-                st.session_state.step = "no_issues"
-            st.rerun()
-    with col2:
-        if st.button(
-            "No, I'm done for now.",
-            use_container_width=True,
-            key="ocr_done",
-        ):
-            st.session_state.step = "done"
-            st.session_state.done_reason = "ocr_exit"
-            st.rerun()
+    # -------------------------------------------------------------------------
+    # SATISFACTION QUESTION — the decision comes before downloads.
+    # Downloading is never a gate to proceeding; it's an optional side-path.
+    # -------------------------------------------------------------------------
+    if not st.session_state.get("ocr_download_mode", False):
+
+        st.markdown("**Are you happy with this result?**")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button(
+                "Yes, let's keep going.",
+                type="primary",
+                use_container_width=True,
+                key="ocr_continue_direct",
+            ):
+                if ocr_issues:
+                    st.session_state.issues = ocr_issues
+                    st.session_state.step   = "issue_list"
+                else:
+                    st.session_state.step = "no_issues"
+                st.rerun()
+
+        with col2:
+            if st.button(
+                "I want to download and review it first.",
+                use_container_width=True,
+                key="ocr_download_first",
+            ):
+                st.session_state.ocr_download_mode = True
+                st.rerun()
+
+        with col3:
+            if st.button(
+                "No, I want to stop.",
+                use_container_width=True,
+                key="ocr_stop_direct",
+            ):
+                st.session_state.step        = "done"
+                st.session_state.done_reason = "ocr_exit"
+                st.rerun()
+
+    else:
+        # ---------------------------------------------------------------------
+        # DOWNLOAD MODE — shown after "I want to download and review it first"
+        # Downloads are presented, then the same continue/stop choice is offered.
+        # ---------------------------------------------------------------------
+        st.markdown(
+            "Your converted file is ready to download. Choose a format below — "
+            "it will be saved with **_readable** added to your original file name."
+        )
+
+        base_name = st.session_state.file_name.replace(".pdf", "").replace(".PDF", "")
+        docx_name = f"{base_name}_readable.docx"
+        pdf_name  = f"{base_name}_readable.pdf"
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Word processor document (DOCX)**")
+            st.caption(
+                "Opens in Microsoft Word, Google Docs, or any compatible application. "
+                "Best if you need to edit the content further before re-publishing."
+            )
+            st.download_button(
+                label=f"⬇ Download {docx_name}",
+                data=st.session_state.ocr_docx_bytes,
+                file_name=docx_name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                type="primary",
+                use_container_width=True,
+            )
+        with col2:
+            st.markdown("**New PDF document**")
+            st.caption(
+                "A text-based PDF ready to share or upload directly. "
+                "Best if you want a finished file."
+            )
+            st.download_button(
+                label=f"⬇ Download {pdf_name}",
+                data=st.session_state.ocr_pdf_bytes,
+                file_name=pdf_name,
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+        st.caption(f'📄 Note added to your file: "{OCR_DISCLAIMER}"')
+        st.divider()
+
+        st.markdown("**Ready to keep going?**")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                "Yes, let's keep going.",
+                type="primary",
+                use_container_width=True,
+                key="ocr_continue_after_download",
+            ):
+                st.session_state.ocr_download_mode = False
+                if ocr_issues:
+                    st.session_state.issues = ocr_issues
+                    st.session_state.step   = "issue_list"
+                else:
+                    st.session_state.step = "no_issues"
+                st.rerun()
+        with col2:
+            if st.button(
+                "No, I'm done for now.",
+                use_container_width=True,
+                key="ocr_done_after_download",
+            ):
+                st.session_state.ocr_download_mode = False
+                st.session_state.step              = "done"
+                st.session_state.done_reason       = "ocr_exit"
+                st.rerun()
 
     _render_go_back("scanned_doc")
 
@@ -3350,10 +3472,11 @@ def render_issue_list():
     st.title("♿ PDF Assistant")
     st.divider()
 
-    # Count remaining unresolved issues
+    # Count remaining unresolved, unskipped issues
     remaining = [
         issue for issue in st.session_state.issues
         if issue["id"] not in st.session_state.resolved_ids
+        and issue["id"] not in st.session_state.get("skipped_ids", [])
     ]
 
     if not remaining:
@@ -3412,10 +3535,14 @@ def render_issue_list():
         st.markdown("")  # Spacing between severity groups
 
     # Progress indicator
-    total = len(st.session_state.issues)
+    total    = len(st.session_state.issues)
     resolved = len(st.session_state.resolved_ids)
+    skipped  = len(st.session_state.get("skipped_ids", []))
     st.divider()
-    st.caption(f"{resolved} of {total} issues resolved")
+    caption = f"{resolved} of {total} issues resolved"
+    if skipped:
+        caption += f" · {skipped} skipped"
+    st.caption(caption)
 
     _render_go_back("upload")
 
@@ -3477,9 +3604,10 @@ def _render_abandon_button():
         help="Stop what you're doing and return to the issue list. Completed fixes are kept.",
     ):
         # Clear any in-progress issue state so the issue list starts clean.
-        st.session_state.current_issue_id = None
-        st.session_state.proposed_fix     = None
-        st.session_state.step             = "issue_list"
+        st.session_state.current_issue_id    = None
+        st.session_state.proposed_fix        = None
+        st.session_state.showing_alternative = False
+        st.session_state.step                = "issue_list"
         st.rerun()
 
 
@@ -4252,6 +4380,8 @@ def render_resolving_issue():
     Per CLAUDE.md Per-Issue QA Process:
       Step 1 — Internal self-check (not shown to user — we simulate this).
       Step 2 — Faculty confirmation with exact verbatim message.
+    When the faculty member clicks "No, let's try again.", an issue-specific
+    alternative is offered before falling back to returning to the issue list.
     """
     st.title("♿ PDF Assistant")
     st.divider()
@@ -4278,6 +4408,286 @@ def render_resolving_issue():
     st.markdown(issue["description"])
 
     st.divider()
+
+    # =========================================================================
+    # Shared apply-and-advance logic used by both standard and alternative mode.
+    # Extracted here to avoid repeating the resolved_count / step logic below.
+    # =========================================================================
+    def _apply_and_advance():
+        """Apply the fix for the current issue and advance to the next step."""
+        fix_fn = FIX_DISPATCH.get(issue["id"])
+        if fix_fn and st.session_state.working_pdf_bytes:
+            new_bytes, _ = fix_fn(
+                st.session_state.working_pdf_bytes,
+                issue.get("fix_data", {}),
+            )
+            st.session_state.working_pdf_bytes = new_bytes
+        st.session_state.resolved_ids.append(issue["id"])
+        st.session_state.resolved_count      += 1
+        st.session_state.current_issue_id    = None
+        st.session_state.proposed_fix        = None
+        st.session_state.showing_alternative = False
+        if (
+            st.session_state.resolved_count % 3 == 0
+            and not st.session_state.reanalysis_done
+        ):
+            st.session_state.step = "re_analysis"
+        else:
+            st.session_state.reanalysis_done = False
+            st.session_state.step = "continue_or_stop"
+        st.rerun()
+
+    def _skip_issue():
+        """Mark the current issue as skipped and return to the issue list."""
+        st.session_state.skipped_ids.append(issue["id"])
+        st.session_state.current_issue_id    = None
+        st.session_state.showing_alternative = False
+        st.session_state.step                = "issue_list"
+        st.rerun()
+
+    # =========================================================================
+    # ALTERNATIVE MODE
+    # Shown after the faculty member clicks "No, let's try again."
+    # Each issue type gets a custom path: more control, or a plain explanation
+    # of how the fix works so they can decide whether to proceed or skip it.
+    # =========================================================================
+    if st.session_state.get("showing_alternative", False):
+
+        st.markdown("### Let's try a different approach")
+
+        # --- missing_title: let them type a completely fresh title ---
+        if issue["id"] == "missing_title":
+            st.markdown(
+                "No problem — the field is yours. Clear it and type any title you'd like "
+                "to use for this document:"
+            )
+            new_title = st.text_input(
+                "Document title:",
+                value="",
+                key="title_input_alt",
+                help="Type a title from scratch — anything that describes the document.",
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Save this title",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    value = (new_title or "").strip()
+                    if not value:
+                        st.warning("Please enter a title before saving.")
+                    else:
+                        issue["fix_data"]["confirmed_title"] = value
+                        _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- missing_lang: show a language picker dropdown ---
+        elif issue["id"] == "missing_lang":
+            # Ordered dict of display names → BCP 47 codes for the selectbox
+            lang_options = {
+                "English (United States)": "en-US",
+                "English (United Kingdom)": "en-GB",
+                "Spanish":                 "es-ES",
+                "French":                  "fr-FR",
+                "German":                  "de-DE",
+                "Portuguese":              "pt-PT",
+                "Italian":                 "it-IT",
+                "Chinese (Simplified)":    "zh-CN",
+                "Chinese (Traditional)":   "zh-TW",
+                "Japanese":                "ja",
+                "Korean":                  "ko",
+                "Arabic":                  "ar",
+                "Russian":                 "ru",
+                "Hindi":                   "hi",
+                "Dutch":                   "nl-NL",
+                "Polish":                  "pl",
+                "Turkish":                 "tr",
+            }
+            current_code = issue.get("fix_data", {}).get("lang_code", "en-US")
+            current_display = next(
+                (k for k, v in lang_options.items() if v == current_code),
+                "English (United States)",
+            )
+            st.markdown(
+                f"The auto-detected language was **{_lang_display_name(current_code)}**. "
+                "If that's not right, choose the correct language from the list below:"
+            )
+            selected_name = st.selectbox(
+                "Document language:",
+                options=list(lang_options.keys()),
+                index=list(lang_options.keys()).index(current_display),
+                key="lang_select_alt",
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Apply this language",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    issue["fix_data"]["lang_code"] = lang_options[selected_name]
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- missing_bookmarks: show the generated bookmark list for review ---
+        elif issue["id"] == "missing_bookmarks":
+            st.markdown(
+                "Here's the bookmark structure I would add, based on the headings I found "
+                "in your document. Take a look — if it looks right, go ahead and add them."
+            )
+            toc = []
+            if st.session_state.working_pdf_bytes:
+                try:
+                    doc_preview = fitz.open(
+                        stream=st.session_state.working_pdf_bytes, filetype="pdf"
+                    )
+                    toc = _generate_toc_from_font_sizes(doc_preview)
+                    doc_preview.close()
+                except Exception:
+                    toc = []
+
+            if toc:
+                # Indent by heading level using non-breaking spaces so the
+                # hierarchy is visible in the Streamlit markdown output.
+                level_indent = {1: "", 2: "    ", 3: "        "}
+                lines = [
+                    f"{level_indent.get(level, '')}• **{title}** — page {page}"
+                    for level, title, page in toc
+                ]
+                st.markdown("  \n".join(lines))
+            else:
+                st.warning(
+                    "I wasn't able to detect any headings in your document — it may not have "
+                    "a clear heading structure, so no bookmarks can be generated automatically. "
+                    "You can skip this issue or add headings to your source document and re-upload."
+                )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Add these bookmarks",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                    disabled=(not toc),
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- untagged_pdf: explain the DOCX conversion path, offer proceed or skip ---
+        elif issue["id"] == "untagged_pdf":
+            st.info(
+                "An untagged PDF can't be fully fixed by editing the PDF directly — adding "
+                "a proper structure tree requires specialized software like Adobe Acrobat Pro. "
+                "Instead, this tool converts your document to a Word file (.docx) with real "
+                "heading styles, list formatting, and reading order built in. You can then "
+                "re-export that Word file as a properly tagged PDF from Word or Google Docs.\n\n"
+                "If you download your file as a Word document at the end of this session, "
+                "the structural improvements will be included automatically."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Got it — apply it anyway",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- heading_hierarchy: explain the heuristic, offer proceed or skip ---
+        elif issue["id"] == "heading_hierarchy":
+            fix_data   = issue.get("fix_data", {})
+            issue_type = fix_data.get("issue_type", "skip")
+            if issue_type == "skip":
+                st.info(
+                    "This fix uses font sizes to infer which lines are headings and what level "
+                    "each should be, then rewrites the heading tags so they follow a logical "
+                    "sequence (Heading 1 → Heading 2 → Heading 3) with no skipped levels.\n\n"
+                    "This works well for most documents, but it relies on consistent font sizing "
+                    "for headings — so if your document uses unusual formatting, the result may "
+                    "not be perfect. You can always review the output before finalizing."
+                )
+            else:
+                st.info(
+                    "This fix corrects the heading structure so it follows a logical sequence. "
+                    "Screen reader users rely on headings to navigate — without a consistent "
+                    "hierarchy, they can't tell which sections are major and which are sub-sections."
+                )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Got it — apply it anyway",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- readability barriers: explain the DOCX font-size fix path ---
+        elif issue["id"] in ("readability_barrier_severe", "readability_barrier_moderate"):
+            pct = issue.get("fix_data", {}).get("pct_affected", 0)
+            st.info(
+                f"About {pct}% of your document's text is below 9pt. This fix works "
+                "by enforcing a minimum font size when you export to Word (.docx) — "
+                "the original PDF is left unchanged, but the Word version will have "
+                "all text at a comfortably readable size.\n\n"
+                "If you re-export that Word file as a PDF, the corrected sizes carry "
+                "through automatically."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Got it — apply it anyway",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- fallback for any issue type not explicitly handled above ---
+        else:
+            st.info(
+                "This fix is applied automatically based on what we detected in your document. "
+                "If you're not sure about it, you can skip this issue for now and come back later."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Apply it anyway",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        _render_abandon_button()
+        return
+
+    # =========================================================================
+    # STANDARD MODE — initial view before any rejection
+    # =========================================================================
 
     # -------------------------------------------------------------------------
     # Issue-specific fix UI
@@ -4343,35 +4753,7 @@ def render_resolving_issue():
                     issue["fix_data"]["confirmed_title"] = value
 
             if proceed:
-                # Apply the real fix to the working copy of the PDF.
-                # FIX_DISPATCH maps issue ID → fix function. If no fix function
-                # exists for this issue ID, the working copy is left unchanged.
-                fix_fn = FIX_DISPATCH.get(issue["id"])
-                if fix_fn and st.session_state.working_pdf_bytes:
-                    new_bytes, _ = fix_fn(
-                        st.session_state.working_pdf_bytes,
-                        issue.get("fix_data", {}),
-                    )
-                    st.session_state.working_pdf_bytes = new_bytes
-
-                # Mark this issue as resolved
-                st.session_state.resolved_ids.append(issue["id"])
-                st.session_state.resolved_count += 1
-                st.session_state.current_issue_id = None
-                st.session_state.proposed_fix = None
-
-                # Check if we've hit a multiple of 3 — offer re-analysis
-                # Per CLAUDE.md: "After every three issues have been resolved, offer a re-analysis"
-                if (
-                    st.session_state.resolved_count % 3 == 0
-                    and not st.session_state.reanalysis_done
-                ):
-                    st.session_state.step = "re_analysis"
-                else:
-                    st.session_state.reanalysis_done = False
-                    st.session_state.step = "continue_or_stop"
-
-                st.rerun()
+                _apply_and_advance()
 
     with col2:
         if st.button(
@@ -4379,10 +4761,9 @@ def render_resolving_issue():
             use_container_width=True,
             key="confirm_no",
         ):
-            # Return to the issue list without marking as resolved.
-            # In Phase 2, this would offer an alternative fix approach.
-            st.session_state.current_issue_id = None
-            st.session_state.step = "issue_list"
+            # Switch to the alternative mode — each issue type has its own
+            # custom second path instead of just returning to the issue list.
+            st.session_state.showing_alternative = True
             st.rerun()
 
     _render_abandon_button()

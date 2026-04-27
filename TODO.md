@@ -1,6 +1,6 @@
 # To Do Next — Agentic AI Accessibility Suite
 
-**Last updated:** 2026-04-16
+**Last updated:** 2026-04-27
 
 ---
 
@@ -17,18 +17,14 @@ All 5 sub-steps implemented:
 
 ---
 
-### 3. Restructure the post-OCR screen ("happy with results?")
-Currently `ocr_format_select` shows downloads first, then asks about continuing.
-The decision should come first — downloading is never a gate to proceeding.
-
-New structure:
-1. Show quality score, "What we did" log, and text preview
-2. Ask: "Are you happy with this result?"
-   - **Yes, let's keep going** → proceed to issue list (no download required now)
-   - **I want to download and review it first** → show download buttons, then ask
-     continue or stop?
-   - **No, I want to stop** → goodbye screen
-3. Downloads are always available at the end via `render_choose_format()`
+### ~~3. Restructure the post-OCR screen ("happy with results?")~~ ✅ Done 2026-04-27
+Decision now comes before downloads. `render_ocr_format_select()` shows quality
+score → processing log → text preview → issue summary, then a 3-way choice:
+- **Yes, let's keep going** → straight to issue list, no download required
+- **I want to download and review it first** → shows downloads + disclaimer,
+  then asks continue or stop (`ocr_download_mode` flag controls this sub-path)
+- **No, I want to stop** → done screen
+Downloads still available at the end via `render_choose_format()`.
 
 ---
 
@@ -39,17 +35,18 @@ are written as visible placeholder text).
 
 ---
 
-### 5. "No, let's try again" should offer an alternative approach
-When faculty reject a proposed fix in `render_resolving_issue()`, the app currently
-just returns to the issue list. Per CLAUDE.md it should either offer an alternative
-fix path or ask the faculty member for more input before trying again.
-
-What "alternative" means per issue:
-- `missing_title` — let them type a completely different title
-- `missing_lang` — show a language picker dropdown instead of auto-detected value
-- `missing_bookmarks` — show the generated bookmark list for manual editing
-- `untagged_pdf` / `heading_hierarchy` — explain why the fix works the way it does
-  and ask if they want to proceed anyway or skip this issue
+### ~~5. "No, let's try again" should offer an alternative approach~~ ✅ Done 2026-04-27
+`render_resolving_issue()` now has a full alternative mode (`showing_alternative`
+flag). Per-issue paths:
+- `missing_title` → empty text input, type a title from scratch
+- `missing_lang` → 17-language selectbox dropdown
+- `missing_bookmarks` → live preview of generated bookmarks from document headings;
+  apply button disabled if no headings detected
+- `untagged_pdf` → explains the DOCX conversion path, "Got it — apply it anyway"
+- `heading_hierarchy` → explains the font-size heuristic, "Got it — apply it anyway"
+- fallback → generic "apply anyway" for any future issue types
+Every alternative also has "Skip this issue for now" which adds to `skipped_ids`
+and removes the issue from the active list. Progress caption shows skipped count.
 
 ---
 
@@ -58,16 +55,16 @@ These issues are defined in CLAUDE.md but not yet checked. All need to be added
 to `analyze_pdf()`. Docling's structural data (available in `docling_doc`) should
 be used where relevant — especially for reading order and list tagging.
 
-| Issue | Severity | Notes |
-|-------|----------|-------|
-| Severe readability barriers (contrast/font/size, > 25% of doc) | 🔴 Red | Needs font color + background color extraction |
-| Moderate readability barriers (same, < 25% of doc) | 🟡 Yellow | Same |
-| Reading order doesn't match visual order | 🟡 Yellow | Docling reading order vs. PyMuPDF block order |
-| Color used as only way to convey information | 🟡 Yellow | Hard without semantic understanding — flag for manual review |
-| Inconsistent list tagging | 🟢 Green | Docling LIST_ITEM labels useful here |
-| Line spacing too tight | 🟢 Green | PyMuPDF span metrics |
-| Letter spacing too tight | 🟢 Green | PyMuPDF span metrics |
-| Excessive text colors | 🟢 Green | Count distinct colors across spans |
+| Issue | Severity | Status | Notes |
+|-------|----------|--------|-------|
+| ~~Severe readability barriers (font size < 9pt, > 25% of doc)~~ | 🔴 Red | ✅ Done 2026-04-27 | `readability_barrier_severe` — detected via span size, fix in DOCX path |
+| ~~Moderate readability barriers (font size < 9pt, 1–25% of doc)~~ | 🟡 Yellow | ✅ Done 2026-04-27 | `readability_barrier_moderate` — same detection, threshold-gated |
+| Reading order doesn't match visual order | 🟡 Yellow | ⬜ Todo | Compare stored block order vs. visual top-to-bottom order |
+| Color used as only way to convey information | 🟡 Yellow | ⬜ Todo | Hard without semantic understanding — flag for manual review |
+| Inconsistent list tagging | 🟢 Green | ⬜ Todo | Docling LIST_ITEM labels useful here |
+| Line spacing too tight | 🟢 Green | ⬜ Todo | PyMuPDF span metrics |
+| Letter spacing too tight | 🟢 Green | ⬜ Todo | PyMuPDF doesn't expose reliably — rough heuristic at best |
+| Excessive text colors | 🟢 Green | ⬜ Todo | Count distinct colors across spans |
 
 ---
 
@@ -79,7 +76,18 @@ be used where relevant — especially for reading order and list tagging.
 
 ---
 
-## Notes from This Session (2026-04-13)
+## Notes from This Session (2026-04-27)
+- TODO #3: Post-OCR screen restructured — decision now comes before downloads;
+  3-way satisfaction question; `ocr_download_mode` flag controls download sub-path
+- TODO #5: "No, let's try again" now has per-issue alternative paths;
+  `showing_alternative` flag; `skipped_ids` list; progress caption shows skipped count
+- TODO #6 (partial): Font size readability detection added to `analyze_pdf()`;
+  `readability_barrier_severe` (🔴 > 25%) and `readability_barrier_moderate` (🟡 1–25%);
+  `apply_fix_readability_barrier()` registered in FIX_DISPATCH; alternative mode branch added
+- Brooklyn College local server authorization pending; ngrok being explored for interim testing
+- Repo: https://github.com/MGluzman/Agentic-AI
+
+## Notes from Session (2026-04-13)
 - Docling installed and integrated as primary PDF structure extractor
 - `_run_docling()` runs at analysis time on digital PDFs; result cached in session state
 - `build_docx_from_pdf()` uses Docling as primary path, PyMuPDF as fallback
