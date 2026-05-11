@@ -1,6 +1,6 @@
 # To Do Next — Agentic AI Accessibility Suite
 
-**Last updated:** 2026-05-11
+**Last updated:** 2026-05-11 (session 2)
 
 ---
 
@@ -59,12 +59,12 @@ be used where relevant — especially for reading order and list tagging.
 |-------|----------|--------|-------|
 | ~~Severe readability barriers (font size < 9pt, > 25% of doc)~~ | 🔴 Red | ✅ Done 2026-04-27 | `readability_barrier_severe` — detected via span size, fix in DOCX path |
 | ~~Moderate readability barriers (font size < 9pt, 1–25% of doc)~~ | 🟡 Yellow | ✅ Done 2026-04-27 | `readability_barrier_moderate` — same detection, threshold-gated |
-| Reading order doesn't match visual order | 🟡 Yellow | ⬜ Todo | Compare stored block order vs. visual top-to-bottom order |
-| Color used as only way to convey information | 🟡 Yellow | ⬜ Todo | Hard without semantic understanding — flag for manual review |
-| Inconsistent list tagging | 🟢 Green | ⬜ Todo | Docling LIST_ITEM labels useful here |
-| Line spacing too tight | 🟢 Green | ⬜ Todo | PyMuPDF span metrics |
-| Letter spacing too tight | 🟢 Green | ⬜ Todo | PyMuPDF doesn't expose reliably — rough heuristic at best |
-| Excessive text colors | 🟢 Green | ⬜ Todo | Count distinct colors across spans |
+| ~~Reading order doesn't match visual order~~ | 🟡 Yellow | ✅ Done 2026-05-11 | PyMuPDF block y-center comparison; flags backward jumps > 25% page height within same column zone |
+| ~~Color used as only way to convey information~~ | 🟡 Yellow | ✅ Done 2026-05-11 | Counts distinct non-black colors ≥ 40 chars; 2–5 → manual review flag; no algorithmic fix |
+| ~~Inconsistent list tagging~~ | 🟢 Green | ✅ Done 2026-05-11 | Regex on visual list patterns vs. Docling LIST_ITEM count; flags large gap |
+| ~~Line spacing too tight~~ | 🟢 Green | ✅ Done 2026-05-11 | Inter-line distance / font size < 1.10 on > 40% of pairs |
+| ~~Letter spacing too tight~~ | 🟢 Green | ✅ Done 2026-05-11 | Span width / (char count × font size) < 0.28; excludes condensed font names |
+| ~~Excessive text colors~~ | 🟢 Green | ✅ Done 2026-05-11 | Reuses color counter; > 5 distinct meaningful colors; mutually exclusive with color-only-cue |
 
 ---
 
@@ -104,6 +104,18 @@ Presents a structured checklist of manually-verifiable items with:
 ### ~~7. Stale "Phase 1" comments in app.py~~ ✅ Done 2026-04-16
 
 ---
+
+## Notes from Session (2026-05-11)
+- TODO #6 complete: all 6 remaining detections added to `analyze_pdf()` in `app.py`
+- `reading_order` (🟡): PyMuPDF block order vs visual y-position; backward jumps > 25% page height, same horizontal zone, ≥2 violations/page on ≥40% of pages
+- `color_only_cue` (🟡): 2–5 distinct non-black text colors with ≥40 chars each → manual review flag; no fix function
+- `inconsistent_list_tagging` (🟢): regex visual list pattern count vs Docling LIST_ITEM count; flags if visual ≥ 8 and docling < 50% of visual
+- `line_spacing_tight` (🟢): inter-line distance / font size < 1.10 on > 40% of multi-line pairs
+- `letter_spacing_tight` (🟢): span width / (char count × font size) < 0.28 on > 45% of spans; excludes condensed font names
+- `excessive_text_colors` (🟢): > 5 distinct non-black colors with ≥40 chars each; mutually exclusive with color_only_cue
+- All 6 have alternative-mode UI branches in `render_resolving_issue()`
+- `import re` added for list-pattern regex
+- No new FIX_DISPATCH entries needed — all fix via DOCX path or manual acknowledgement
 
 ## Notes from This Session (2026-04-27)
 - TODO #3: Post-OCR screen restructured — decision now comes before downloads;

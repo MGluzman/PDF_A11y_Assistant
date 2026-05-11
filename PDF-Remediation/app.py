@@ -23,6 +23,7 @@
 
 import io                    # In-memory byte streams for building files without writing to disk
 import os                    # File system operations — used for temp file cleanup in Docling helper
+import re                    # Regular expressions — used for detecting visual list patterns in text
 import shutil                # shutil.which() — locate executables on the system PATH
 import subprocess            # Run Tesseract as a subprocess to verify it is callable
 import tempfile              # Creates temporary files that Docling's converter can read by path
@@ -2060,6 +2061,347 @@ def analyze_pdf(file_bytes):
                     "small_chars":  small_chars,
                     "total_chars":  total_chars,
                 },
+            })
+
+        # --- CONTENT CHECK: Reading order doesn't match visual order (Yellow) ---
+        # PyMuPDF returns text blocks in the order they are embedded in the PDF
+        # file — not necessarily the visual top-to-bottom order a reader follows.
+        # In a well-structured document these two orders match. When they don't
+        # (e.g. a footer stored before the main body, or a sidebar before its
+        # surrounding paragraph), screen readers encounter content out of sequence.
+        #
+        # Method: for each page, compare each block's y-center to the previous
+        # block's. A backward jump larger than 25% of the page height — within
+        # the same horizontal zone — signals the stored order doesn't match the
+        # visual order. Two or more such jumps per page, on 40%+ of checked pages,
+        # triggers the flag. The horizontal-zone filter prevents multi-column
+        # boundaries (left column → right column) from producing false positives.
+        reading_order_problem_pages = 0
+        reading_order_pages_checked = 0
+
+        for page in doc:
+            page_h = page.rect.height
+            page_w = page.rect.width
+            blocks = page.get_text("dict")["blocks"]
+            text_blocks = [b for b in blocks if b.get("type") == 0 and b.get("lines")]
+            if len(text_blocks) < 4:
+                continue
+            reading_order_pages_checked += 1
+            violations = 0
+            for i in range(1, len(text_blocks)):
+                prev_y = (text_blocks[i - 1]["bbox"][1] + text_blocks[i - 1]["bbox"][3]) / 2
+                curr_y = (text_blocks[i]["bbox"][1]     + text_blocks[i]["bbox"][3])     / 2
+                prev_x = (text_blocks[i - 1]["bbox"][0] + text_blocks[i - 1]["bbox"][2]) / 2
+                curr_x = (text_blocks[i]["bbox"][0]     + text_blocks[i]["bbox"][2])     / 2
+                # Flag only if current block jumps significantly ABOVE the previous one
+                # AND both blocks share a similar horizontal zone (same column region).
+                if (curr_y < prev_y - page_h * 0.25) and (abs(curr_x - prev_x) < page_w * 0.40):
+                    violations += 1
+            if violations >= 2:
+                reading_order_problem_pages += 1
+
+        if (
+            reading_order_pages_checked >= 2
+            and reading_order_problem_pages >= max(1, reading_order_pages_checked * 0.40)
+        ):
+            issues.append({
+                "id": "reading_order",
+                "severity": "yellow",
+                "title": "Reading order may not match visual order",
+                "description": (
+                    "The order in which content was embedded in this PDF doesn't match "
+                    "the top-to-bottom order a sighted reader would follow. Screen readers "
+                    "and assistive technology encounter content in the order it is stored "
+                    "in the file — if that order is scrambled, users hear content out of "
+                    "sequence, making the document confusing or unintelligible."
+                ),
+                "wcag": "WCAG 2.1 SC 1.3.2 — Meaningful Sequence",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    "When you download your file as a Word document, the content will be "
+                    "re-ordered into a logical top-to-bottom reading sequence. Re-exporting "
+                    "from Word will produce a PDF with a correct, consistent reading order."
+                ),
+                "fix_data": {
+                    "problem_pages": reading_order_problem_pages,
+                    "pages_checked": reading_order_pages_checked,
+                },
+            })
+
+        # --- CONTENT CHECK: Color used as only cue for information (Yellow) ---
+        # When a document uses color to distinguish categories, priorities, or
+        # required fields — and color is the only indicator with no secondary
+        # label, symbol, or text — color-blind users and those printing in
+        # black-and-white lose that meaning entirely.
+        #
+        # We detect this by counting distinct non-black text colors with
+        # substantial use (>= 40 characters total in that color). 2–5 distinct
+        # meaningful colors suggests intentional color-coded content and warrants
+        # a manual review flag. Documents with 6+ colors are handled separately
+        # by the "excessive colors" check below (the two are mutually exclusive).
+        #
+        # There is no algorithmic fix — this check always flags for manual review.
+        color_usage = Counter()  # maps color int → total characters in that color
+
+        for page in doc:
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text = span.get("text", "").strip()
+                        if len(text) < 3:
+                            continue
+                        color = span.get("color", 0)
+                        # Decode packed RGB integer (PyMuPDF format: 0xRRGGBB)
+                        r = (color >> 16) & 0xFF
+                        g = (color >> 8)  & 0xFF
+                        b = color         & 0xFF
+                        brightness = (r + g + b) / 3
+                        # Exclude near-black (< 40) and near-white (> 215) —
+                        # body text and background-colored text are not color cues
+                        if 40 <= brightness <= 215:
+                            color_usage[color] += len(text)
+
+        # Colors used on >= 40 characters are considered meaningful (not incidental)
+        meaningful_colors = [c for c, cnt in color_usage.items() if cnt >= 40]
+
+        if 2 <= len(meaningful_colors) <= 5:
+            issues.append({
+                "id": "color_only_cue",
+                "severity": "yellow",
+                "title": "Color may be used as the only way to convey information",
+                "description": (
+                    f"This document uses {len(meaningful_colors)} distinct text colors "
+                    "across significant portions of the content. If color is the only "
+                    "thing distinguishing categories, priorities, required items, or "
+                    "other meaningful differences — with no accompanying label, symbol, "
+                    "or text — students who are color-blind or printing in black and "
+                    "white will miss that meaning entirely."
+                ),
+                "wcag": "WCAG 2.1 SC 1.4.1 — Use of Color",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    "This issue requires a quick manual check — I can't determine what "
+                    "the colors mean just from the file. Look through your document and "
+                    "confirm that anything communicated by color also has a text label, "
+                    "symbol, or other non-color indicator alongside it."
+                ),
+                "fix_data": {"color_count": len(meaningful_colors)},
+            })
+
+        # --- CONTENT CHECK: Inconsistent list tagging (Green) ---
+        # Lists formatted visually with bullets, dashes, or numbers but not
+        # tagged as list elements in the PDF structure are presented to screen
+        # readers as plain text — without list context, item counts, or navigation.
+        # Screen readers announce "list of 5 items" and let users jump between items;
+        # without tags, that context is invisible.
+        #
+        # We count lines matching a visual list pattern (bullet chars, hyphens,
+        # asterisks, numbered/lettered items) using a regex, then compare to how
+        # many elements Docling classified as LIST_ITEM. A large gap between the
+        # two counts suggests visual lists that aren't structurally tagged.
+        LIST_PATTERN = re.compile(
+            r"^\s*([•·▪▸➢◦○●\-\*]|\d{1,2}[.)]\s|[a-zA-Z][.]\s)\s*\S"
+        )
+        visual_list_lines = 0
+        for page in doc:
+            for line_text in page.get_text().splitlines():
+                if LIST_PATTERN.match(line_text):
+                    visual_list_lines += 1
+
+        docling_list_items = 0
+        if docling_doc is not None:
+            try:
+                for item, _ in docling_doc.iterate_items():
+                    if hasattr(item, "label") and item.label == DocItemLabel.LIST_ITEM:
+                        docling_list_items += 1
+            except Exception:
+                pass  # Docling failure must not interrupt the broader analysis
+
+        # Flag if many visual list lines exist AND Docling found far fewer.
+        # The 50% threshold allows for imperfect Docling detection while still
+        # catching clear cases of untagged visual lists.
+        if visual_list_lines >= 8 and docling_list_items < visual_list_lines * 0.50:
+            issues.append({
+                "id": "inconsistent_list_tagging",
+                "severity": "green",
+                "title": "Lists may not be properly tagged in the document structure",
+                "description": (
+                    f"This document appears to contain {visual_list_lines} list items "
+                    "formatted with bullets, dashes, or numbers — but the underlying "
+                    "file structure may not label them as actual lists. Screen readers "
+                    "announce list context ('list of 5 items') and let users jump "
+                    "between items. Without that tagging, list content reads as a "
+                    "stream of plain text with no navigation or context cues."
+                ),
+                "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    "When you download your file as a Word document, visually formatted "
+                    "lists will be converted to properly structured list elements with "
+                    "correct indentation and item tags. Re-exporting from Word will "
+                    "carry the list structure through into the PDF."
+                ),
+                "fix_data": {
+                    "visual_list_lines":  visual_list_lines,
+                    "docling_list_items": docling_list_items,
+                },
+            })
+
+        # --- CONTENT CHECK: Line spacing too tight (Green) ---
+        # Tight line spacing reduces legibility for many users — particularly
+        # those with dyslexia, low vision, or reading difficulties. WCAG SC
+        # 1.4.12 recommends body text line spacing of at least 1.5× font size.
+        #
+        # We measure the vertical distance between the tops of adjacent lines
+        # within the same text block and divide by the span's font size. Values
+        # below 1.10 (tighter than standard single spacing) are flagged. Very
+        # small text (< 7pt) such as footnotes is excluded — compact layout is
+        # expected there and flagging it would produce noise.
+        tight_line_pairs = 0
+        total_line_pairs = 0
+
+        for page in doc:
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                lines = block.get("lines", [])
+                if len(lines) < 2:
+                    continue  # single-line blocks have no inter-line gap to measure
+                for i in range(len(lines) - 1):
+                    curr_spans = lines[i].get("spans", [])
+                    if not curr_spans:
+                        continue
+                    font_size = curr_spans[0].get("size", 0)
+                    if font_size < 7:
+                        continue  # skip footnote-scale text
+                    # In PyMuPDF's dict output, y values increase downward.
+                    # line_step = distance from top of current line to top of next.
+                    line_step = lines[i + 1]["bbox"][1] - lines[i]["bbox"][1]
+                    if line_step <= 0:
+                        continue
+                    total_line_pairs += 1
+                    # Standard single spacing ≈ 1.2× font size; below 1.10 is tight
+                    if (line_step / font_size) < 1.10:
+                        tight_line_pairs += 1
+
+        if total_line_pairs >= 20 and (tight_line_pairs / total_line_pairs) > 0.40:
+            pct_tight = round(tight_line_pairs / total_line_pairs * 100)
+            issues.append({
+                "id": "line_spacing_tight",
+                "severity": "green",
+                "title": "Line spacing may be too tight",
+                "description": (
+                    f"About {pct_tight}% of this document's text lines are spaced "
+                    "tighter than the recommended minimum. Tight line spacing makes "
+                    "sustained reading harder — especially for students with dyslexia, "
+                    "low vision, or attention difficulties. WCAG recommends body text "
+                    "line spacing of at least 1.5× the font size."
+                ),
+                "wcag": "WCAG 2.1 SC 1.4.12 — Text Spacing",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    "When you download your file as a Word document, I'll apply 1.5× "
+                    "line spacing to all body text. This improves readability without "
+                    "changing the document's structure or meaning."
+                ),
+                "fix_data": {"tight_pct": pct_tight},
+            })
+
+        # --- CONTENT CHECK: Letter spacing too tight (Green) ---
+        # Compressed letter tracking reduces legibility, especially for users
+        # with dyslexia who rely on distinct character shapes and spacing.
+        # WCAG SC 1.4.12 recommends letter spacing of at least 0.12× font size.
+        #
+        # PyMuPDF doesn't expose character spacing directly, so we estimate it
+        # geometrically: divide span width by (character count × font size).
+        # For most proportional fonts at normal tracking, this ratio is 0.40–0.60.
+        # Values below 0.28 suggest extreme compression. Known condensed typefaces
+        # are excluded by name — their narrow widths are by design, not tracking.
+        CONDENSED_FONT_HINTS = {"condense", "narrow", "compress", "condens"}
+        tight_tracking_spans = 0
+        total_tracking_spans = 0
+
+        for page in doc:
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text = span.get("text", "").strip()
+                        if len(text) < 5:
+                            continue
+                        font_name = span.get("font", "").lower()
+                        # Skip condensed typefaces — narrow widths are by design
+                        if any(hint in font_name for hint in CONDENSED_FONT_HINTS):
+                            continue
+                        font_size = span.get("size", 0)
+                        if font_size < 8:
+                            continue
+                        span_width = span["bbox"][2] - span["bbox"][0]
+                        if span_width <= 0:
+                            continue
+                        # Char width ratio = (span_width / char_count) / font_size.
+                        # Typical proportional fonts at normal tracking: 0.40–0.60.
+                        # Below 0.28 indicates extreme compression.
+                        char_width_ratio = span_width / (len(text) * font_size)
+                        total_tracking_spans += 1
+                        if char_width_ratio < 0.28:
+                            tight_tracking_spans += 1
+
+        if total_tracking_spans >= 40 and (tight_tracking_spans / total_tracking_spans) > 0.45:
+            pct_tracking = round(tight_tracking_spans / total_tracking_spans * 100)
+            issues.append({
+                "id": "letter_spacing_tight",
+                "severity": "green",
+                "title": "Letter spacing may be too tight",
+                "description": (
+                    "A significant portion of this document's text appears to use "
+                    "compressed letter spacing. Tight character tracking reduces "
+                    "legibility for all readers and creates particular barriers for "
+                    "students with dyslexia, who rely on distinct spacing between "
+                    "letters to distinguish similar characters (b/d, p/q, n/m)."
+                ),
+                "wcag": "WCAG 2.1 SC 1.4.12 — Text Spacing",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    "When you download your file as a Word document, letter spacing "
+                    "will be normalized to the font's standard tracking. This removes "
+                    "any artificial compression present in the original file."
+                ),
+                "fix_data": {"tight_pct": pct_tracking},
+            })
+
+        # --- CONTENT CHECK: Excessive use of text colors (Green) ---
+        # Documents that use many different text colors create visual noise and
+        # cognitive distraction. This is distinct from the "color as only cue"
+        # check above: here we flag sheer color volume (> 5 meaningful colors),
+        # not whether those colors encode semantic meaning. The two checks are
+        # mutually exclusive: 2–5 colors → color_only_cue; 6+ → this check.
+        # Both reuse the meaningful_colors list computed in the color_only_cue
+        # block above.
+        if len(meaningful_colors) > 5:
+            issues.append({
+                "id": "excessive_text_colors",
+                "severity": "green",
+                "title": "Excessive use of different text colors",
+                "description": (
+                    f"This document uses {len(meaningful_colors)} distinct text colors "
+                    "across substantial portions of the content. Using many different "
+                    "text colors creates visual noise and cognitive distraction, making "
+                    "it harder to focus on the material. It can also confuse readers "
+                    "about which color differences carry meaning and which are decorative."
+                ),
+                "wcag": "WCAG 2.1 SC 1.4.1 — Use of Color",
+                "ada": "Title II ADA, 28 CFR Part 35",
+                "fix_preview": (
+                    "When you download your file as a Word document, text colors will "
+                    "be reduced to a small, intentional set — body text and headings. "
+                    "This keeps the visual hierarchy clear without the distraction of "
+                    "many competing colors."
+                ),
+                "fix_data": {"color_count": len(meaningful_colors)},
             })
 
         doc.close()
@@ -4650,6 +4992,146 @@ def render_resolving_issue():
                 "all text at a comfortably readable size.\n\n"
                 "If you re-export that Word file as a PDF, the corrected sizes carry "
                 "through automatically."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Got it — apply it anyway",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- reading_order: explain that DOCX conversion corrects reading order ---
+        elif issue["id"] == "reading_order":
+            st.info(
+                "This fix works through the Word document export. When your PDF is "
+                "converted to a Word document, content is extracted and re-laid-out in "
+                "a visual top-to-bottom sequence — which corrects cases where the PDF's "
+                "internal block order doesn't match the expected reading flow.\n\n"
+                "Re-exporting that Word file as PDF will produce a document with a "
+                "correct, consistent reading order."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Got it — apply it anyway",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- color_only_cue: manual review required, no algorithmic fix ---
+        elif issue["id"] == "color_only_cue":
+            st.info(
+                "This is a manual check — there's no automated fix I can apply for "
+                "this one. Go through your document and look for places where color "
+                "alone carries meaning: required fields marked only in red, categories "
+                "coded only by text color, warnings with no symbol or label.\n\n"
+                "For each color-coded element, add a text label, an asterisk, a "
+                "symbol, or any other non-color indicator alongside it. Once you've "
+                "reviewed the document, you can acknowledge this issue and continue."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "I've reviewed it — looks fine",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- inconsistent_list_tagging: explain DOCX conversion improves list structure ---
+        elif issue["id"] == "inconsistent_list_tagging":
+            st.info(
+                "This fix is handled through the Word document export. When your PDF "
+                "is converted to a Word document, lines formatted with bullets, dashes, "
+                "or numbers are recognized and converted to properly structured list "
+                "elements with correct indentation and tags.\n\n"
+                "Re-exporting the Word file as PDF will carry the list structure into "
+                "the accessible PDF."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Got it — apply it anyway",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- line_spacing_tight: explain the 1.5× line spacing fix in DOCX ---
+        elif issue["id"] == "line_spacing_tight":
+            tight_pct = issue.get("fix_data", {}).get("tight_pct", 0)
+            st.info(
+                f"About {tight_pct}% of your text has line spacing tighter than the "
+                "recommended minimum. This fix applies 1.5× line spacing to body text "
+                "in the Word document export — the original PDF is left unchanged.\n\n"
+                "Re-exporting the Word file as PDF will carry the improved spacing "
+                "through automatically."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Got it — apply it anyway",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- letter_spacing_tight: explain the tracking normalization fix ---
+        elif issue["id"] == "letter_spacing_tight":
+            st.info(
+                "This fix normalizes letter spacing in the Word document export. When "
+                "compressed character tracking is detected, the Word output uses each "
+                "font's standard tracking — removing any artificial compression.\n\n"
+                "Note: this check uses a geometric estimate and may occasionally flag "
+                "documents with naturally narrow typefaces. Review the output to "
+                "confirm the result looks right before finalizing."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Got it — apply it anyway",
+                    type="primary",
+                    use_container_width=True,
+                    key="alt_yes",
+                ):
+                    _apply_and_advance()
+            with col2:
+                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                    _skip_issue()
+
+        # --- excessive_text_colors: explain DOCX color normalization ---
+        elif issue["id"] == "excessive_text_colors":
+            color_count = issue.get("fix_data", {}).get("color_count", 0)
+            st.info(
+                f"This document uses {color_count} distinct text colors. In the Word "
+                "document export, text colors will be reduced to a small intentional "
+                "set — body text and headings — removing visual noise without changing "
+                "the document's content or structure.\n\n"
+                "The original PDF is left unchanged. The simplified color palette only "
+                "applies to the downloaded Word file."
             )
             col1, col2 = st.columns(2)
             with col1:
