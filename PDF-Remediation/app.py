@@ -46,6 +46,20 @@ from docling.document_converter import DocumentConverter  # Docling — ML-power
 from docling_core.types.doc import DocItemLabel           # Semantic element type labels (heading, list, table, etc.)
 
 
+# ---------------------------------------------------------------------------
+# Module-level constants for the PDF analysis pipeline.
+# ---------------------------------------------------------------------------
+
+# Compiled once at import time — regex for visually formatted list lines.
+LIST_PATTERN = re.compile(
+    r"^\s*([•·▪▸➢◦○●\-\*]|\d{1,2}[.)]\s|[a-zA-Z][.]\s)\s*\S"
+)
+
+# Font name substrings identifying condensed typefaces — excluded from the
+# letter-spacing heuristic because their narrow widths are intentional design.
+CONDENSED_FONT_HINTS = frozenset({"condense", "narrow", "compress", "condens"})
+
+
 # -----------------------------------------------------------------------------
 # PAGE CONFIGURATION
 # Must be the FIRST Streamlit call in the script. Sets the browser tab title,
@@ -2063,43 +2077,94 @@ def analyze_pdf(file_bytes):
                 },
             })
 
-        # --- CONTENT CHECK: Reading order doesn't match visual order (Yellow) ---
-        # PyMuPDF returns text blocks in the order they are embedded in the PDF
-        # file — not necessarily the visual top-to-bottom order a reader follows.
-        # In a well-structured document these two orders match. When they don't
-        # (e.g. a footer stored before the main body, or a sidebar before its
-        # surrounding paragraph), screen readers encounter content out of sequence.
-        #
-        # Method: for each page, compare each block's y-center to the previous
-        # block's. A backward jump larger than 25% of the page height — within
-        # the same horizontal zone — signals the stored order doesn't match the
-        # visual order. Two or more such jumps per page, on 40%+ of checked pages,
-        # triggers the flag. The horizontal-zone filter prevents multi-column
-        # boundaries (left column → right column) from producing false positives.
+        # --- COMBINED SCAN: reading order, color, list tagging, line spacing, letter spacing ---
+        # page.get_text("dict") re-parses the page binary on every call — no caching.
+        # One pass per page eliminates four redundant parse calls on every document page.
         reading_order_problem_pages = 0
         reading_order_pages_checked = 0
+        color_usage     = Counter()
+        visual_list_lines   = 0
+        tight_line_pairs    = 0
+        total_line_pairs    = 0
+        tight_tracking_spans  = 0
+        total_tracking_spans  = 0
 
         for page in doc:
             page_h = page.rect.height
             page_w = page.rect.width
             blocks = page.get_text("dict")["blocks"]
             text_blocks = [b for b in blocks if b.get("type") == 0 and b.get("lines")]
-            if len(text_blocks) < 4:
-                continue
-            reading_order_pages_checked += 1
-            violations = 0
-            for i in range(1, len(text_blocks)):
-                prev_y = (text_blocks[i - 1]["bbox"][1] + text_blocks[i - 1]["bbox"][3]) / 2
-                curr_y = (text_blocks[i]["bbox"][1]     + text_blocks[i]["bbox"][3])     / 2
-                prev_x = (text_blocks[i - 1]["bbox"][0] + text_blocks[i - 1]["bbox"][2]) / 2
-                curr_x = (text_blocks[i]["bbox"][0]     + text_blocks[i]["bbox"][2])     / 2
-                # Flag only if current block jumps significantly ABOVE the previous one
-                # AND both blocks share a similar horizontal zone (same column region).
-                if (curr_y < prev_y - page_h * 0.25) and (abs(curr_x - prev_x) < page_w * 0.40):
-                    violations += 1
-            if violations >= 2:
-                reading_order_problem_pages += 1
 
+            # Reading order: flag pages where blocks jump significantly upward within
+            # the same column zone (> 25% of page height, < 40% of width apart).
+            if len(text_blocks) >= 4:
+                reading_order_pages_checked += 1
+                violations = 0
+                for i in range(1, len(text_blocks)):
+                    prev_y = (text_blocks[i-1]["bbox"][1] + text_blocks[i-1]["bbox"][3]) / 2
+                    curr_y = (text_blocks[i]["bbox"][1]   + text_blocks[i]["bbox"][3])   / 2
+                    prev_x = (text_blocks[i-1]["bbox"][0] + text_blocks[i-1]["bbox"][2]) / 2
+                    curr_x = (text_blocks[i]["bbox"][0]   + text_blocks[i]["bbox"][2])   / 2
+                    if (curr_y < prev_y - page_h * 0.25) and (abs(curr_x - prev_x) < page_w * 0.40):
+                        violations += 1
+                if violations >= 2:
+                    reading_order_problem_pages += 1
+
+            for block in text_blocks:
+                lines = block.get("lines", [])
+
+                # Line spacing: measure gap between adjacent line tops relative to font size.
+                # Skips single-line blocks (range is empty) and footnote-scale text (< 7pt).
+                for i in range(len(lines) - 1):
+                    first_spans = lines[i].get("spans", [])
+                    if not first_spans:
+                        continue
+                    line_fs = first_spans[0].get("size", 0)
+                    if line_fs < 7:
+                        continue
+                    line_step = lines[i + 1]["bbox"][1] - lines[i]["bbox"][1]
+                    if line_step <= 0:
+                        continue
+                    total_line_pairs += 1
+                    if (line_step / line_fs) < 1.10:  # below standard single spacing
+                        tight_line_pairs += 1
+
+                for line in lines:
+                    # List pattern: reconstruct the full line string from its spans so
+                    # LIST_PATTERN can check the leading characters without a second
+                    # page.get_text() call.
+                    line_text = "".join(s.get("text", "") for s in line.get("spans", []))
+                    if LIST_PATTERN.match(line_text):
+                        visual_list_lines += 1
+
+                    for span in line.get("spans", []):
+                        text = span.get("text", "").strip()
+                        if not text:
+                            continue
+
+                        # Color: accumulate character count per non-black/non-white color.
+                        # Excludes near-black (< 40) and near-white (> 215) brightness.
+                        if len(text) >= 3:
+                            color = span.get("color", 0)
+                            r, g, b = (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF
+                            if 40 <= (r + g + b) / 3 <= 215:
+                                color_usage[color] += len(text)
+
+                        # Letter spacing: geometric char-width estimate.
+                        # (span_width / char_count) / font_size < 0.28 signals extreme compression.
+                        # Condensed fonts (narrow by design) are excluded via CONDENSED_FONT_HINTS.
+                        if len(text) >= 5:
+                            font_name = span.get("font", "").lower()
+                            if not any(h in font_name for h in CONDENSED_FONT_HINTS):
+                                fs = span.get("size", 0)
+                                if fs >= 8:
+                                    sw = span["bbox"][2] - span["bbox"][0]
+                                    if sw > 0:
+                                        total_tracking_spans += 1
+                                        if sw / (len(text) * fs) < 0.28:
+                                            tight_tracking_spans += 1
+
+        # --- Reading order flag ---
         if (
             reading_order_pages_checked >= 2
             and reading_order_problem_pages >= max(1, reading_order_pages_checked * 0.40)
@@ -2128,42 +2193,9 @@ def analyze_pdf(file_bytes):
                 },
             })
 
-        # --- CONTENT CHECK: Color used as only cue for information (Yellow) ---
-        # When a document uses color to distinguish categories, priorities, or
-        # required fields — and color is the only indicator with no secondary
-        # label, symbol, or text — color-blind users and those printing in
-        # black-and-white lose that meaning entirely.
-        #
-        # We detect this by counting distinct non-black text colors with
-        # substantial use (>= 40 characters total in that color). 2–5 distinct
-        # meaningful colors suggests intentional color-coded content and warrants
-        # a manual review flag. Documents with 6+ colors are handled separately
-        # by the "excessive colors" check below (the two are mutually exclusive).
-        #
-        # There is no algorithmic fix — this check always flags for manual review.
-        color_usage = Counter()  # maps color int → total characters in that color
-
-        for page in doc:
-            for block in page.get_text("dict")["blocks"]:
-                if block.get("type") != 0:
-                    continue
-                for line in block.get("lines", []):
-                    for span in line.get("spans", []):
-                        text = span.get("text", "").strip()
-                        if len(text) < 3:
-                            continue
-                        color = span.get("color", 0)
-                        # Decode packed RGB integer (PyMuPDF format: 0xRRGGBB)
-                        r = (color >> 16) & 0xFF
-                        g = (color >> 8)  & 0xFF
-                        b = color         & 0xFF
-                        brightness = (r + g + b) / 3
-                        # Exclude near-black (< 40) and near-white (> 215) —
-                        # body text and background-colored text are not color cues
-                        if 40 <= brightness <= 215:
-                            color_usage[color] += len(text)
-
-        # Colors used on >= 40 characters are considered meaningful (not incidental)
+        # --- Color only cue / Excessive text colors flags ---
+        # 2–5 distinct meaningful colors → intentional color coding, flag for manual review.
+        # 6+ → excessive color variety. The two conditions are mutually exclusive.
         meaningful_colors = [c for c, cnt in color_usage.items() if cnt >= 40]
 
         if 2 <= len(meaningful_colors) <= 5:
@@ -2190,26 +2222,7 @@ def analyze_pdf(file_bytes):
                 "fix_data": {"color_count": len(meaningful_colors)},
             })
 
-        # --- CONTENT CHECK: Inconsistent list tagging (Green) ---
-        # Lists formatted visually with bullets, dashes, or numbers but not
-        # tagged as list elements in the PDF structure are presented to screen
-        # readers as plain text — without list context, item counts, or navigation.
-        # Screen readers announce "list of 5 items" and let users jump between items;
-        # without tags, that context is invisible.
-        #
-        # We count lines matching a visual list pattern (bullet chars, hyphens,
-        # asterisks, numbered/lettered items) using a regex, then compare to how
-        # many elements Docling classified as LIST_ITEM. A large gap between the
-        # two counts suggests visual lists that aren't structurally tagged.
-        LIST_PATTERN = re.compile(
-            r"^\s*([•·▪▸➢◦○●\-\*]|\d{1,2}[.)]\s|[a-zA-Z][.]\s)\s*\S"
-        )
-        visual_list_lines = 0
-        for page in doc:
-            for line_text in page.get_text().splitlines():
-                if LIST_PATTERN.match(line_text):
-                    visual_list_lines += 1
-
+        # --- Inconsistent list tagging flag ---
         docling_list_items = 0
         if docling_doc is not None:
             try:
@@ -2219,9 +2232,6 @@ def analyze_pdf(file_bytes):
             except Exception:
                 pass  # Docling failure must not interrupt the broader analysis
 
-        # Flag if many visual list lines exist AND Docling found far fewer.
-        # The 50% threshold allows for imperfect Docling detection while still
-        # catching clear cases of untagged visual lists.
         if visual_list_lines >= 8 and docling_list_items < visual_list_lines * 0.50:
             issues.append({
                 "id": "inconsistent_list_tagging",
@@ -2249,43 +2259,7 @@ def analyze_pdf(file_bytes):
                 },
             })
 
-        # --- CONTENT CHECK: Line spacing too tight (Green) ---
-        # Tight line spacing reduces legibility for many users — particularly
-        # those with dyslexia, low vision, or reading difficulties. WCAG SC
-        # 1.4.12 recommends body text line spacing of at least 1.5× font size.
-        #
-        # We measure the vertical distance between the tops of adjacent lines
-        # within the same text block and divide by the span's font size. Values
-        # below 1.10 (tighter than standard single spacing) are flagged. Very
-        # small text (< 7pt) such as footnotes is excluded — compact layout is
-        # expected there and flagging it would produce noise.
-        tight_line_pairs = 0
-        total_line_pairs = 0
-
-        for page in doc:
-            for block in page.get_text("dict")["blocks"]:
-                if block.get("type") != 0:
-                    continue
-                lines = block.get("lines", [])
-                if len(lines) < 2:
-                    continue  # single-line blocks have no inter-line gap to measure
-                for i in range(len(lines) - 1):
-                    curr_spans = lines[i].get("spans", [])
-                    if not curr_spans:
-                        continue
-                    font_size = curr_spans[0].get("size", 0)
-                    if font_size < 7:
-                        continue  # skip footnote-scale text
-                    # In PyMuPDF's dict output, y values increase downward.
-                    # line_step = distance from top of current line to top of next.
-                    line_step = lines[i + 1]["bbox"][1] - lines[i]["bbox"][1]
-                    if line_step <= 0:
-                        continue
-                    total_line_pairs += 1
-                    # Standard single spacing ≈ 1.2× font size; below 1.10 is tight
-                    if (line_step / font_size) < 1.10:
-                        tight_line_pairs += 1
-
+        # --- Line spacing flag ---
         if total_line_pairs >= 20 and (tight_line_pairs / total_line_pairs) > 0.40:
             pct_tight = round(tight_line_pairs / total_line_pairs * 100)
             issues.append({
@@ -2309,47 +2283,7 @@ def analyze_pdf(file_bytes):
                 "fix_data": {"tight_pct": pct_tight},
             })
 
-        # --- CONTENT CHECK: Letter spacing too tight (Green) ---
-        # Compressed letter tracking reduces legibility, especially for users
-        # with dyslexia who rely on distinct character shapes and spacing.
-        # WCAG SC 1.4.12 recommends letter spacing of at least 0.12× font size.
-        #
-        # PyMuPDF doesn't expose character spacing directly, so we estimate it
-        # geometrically: divide span width by (character count × font size).
-        # For most proportional fonts at normal tracking, this ratio is 0.40–0.60.
-        # Values below 0.28 suggest extreme compression. Known condensed typefaces
-        # are excluded by name — their narrow widths are by design, not tracking.
-        CONDENSED_FONT_HINTS = {"condense", "narrow", "compress", "condens"}
-        tight_tracking_spans = 0
-        total_tracking_spans = 0
-
-        for page in doc:
-            for block in page.get_text("dict")["blocks"]:
-                if block.get("type") != 0:
-                    continue
-                for line in block.get("lines", []):
-                    for span in line.get("spans", []):
-                        text = span.get("text", "").strip()
-                        if len(text) < 5:
-                            continue
-                        font_name = span.get("font", "").lower()
-                        # Skip condensed typefaces — narrow widths are by design
-                        if any(hint in font_name for hint in CONDENSED_FONT_HINTS):
-                            continue
-                        font_size = span.get("size", 0)
-                        if font_size < 8:
-                            continue
-                        span_width = span["bbox"][2] - span["bbox"][0]
-                        if span_width <= 0:
-                            continue
-                        # Char width ratio = (span_width / char_count) / font_size.
-                        # Typical proportional fonts at normal tracking: 0.40–0.60.
-                        # Below 0.28 indicates extreme compression.
-                        char_width_ratio = span_width / (len(text) * font_size)
-                        total_tracking_spans += 1
-                        if char_width_ratio < 0.28:
-                            tight_tracking_spans += 1
-
+        # --- Letter spacing flag ---
         if total_tracking_spans >= 40 and (tight_tracking_spans / total_tracking_spans) > 0.45:
             pct_tracking = round(tight_tracking_spans / total_tracking_spans * 100)
             issues.append({
@@ -2373,14 +2307,7 @@ def analyze_pdf(file_bytes):
                 "fix_data": {"tight_pct": pct_tracking},
             })
 
-        # --- CONTENT CHECK: Excessive use of text colors (Green) ---
-        # Documents that use many different text colors create visual noise and
-        # cognitive distraction. This is distinct from the "color as only cue"
-        # check above: here we flag sheer color volume (> 5 meaningful colors),
-        # not whether those colors encode semantic meaning. The two checks are
-        # mutually exclusive: 2–5 colors → color_only_cue; 6+ → this check.
-        # Both reuse the meaningful_colors list computed in the color_only_cue
-        # block above.
+        # --- Excessive text colors flag ---
         if len(meaningful_colors) > 5:
             issues.append({
                 "id": "excessive_text_colors",
@@ -4788,6 +4715,16 @@ def render_resolving_issue():
         st.session_state.step                = "issue_list"
         st.rerun()
 
+    def _docx_path_buttons(primary_label="Got it — apply it anyway"):
+        """Two-button footer shared by every DOCX-path alternative-mode branch."""
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(primary_label, type="primary", use_container_width=True, key="alt_yes"):
+                _apply_and_advance()
+        with col2:
+            if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
+                _skip_issue()
+
     # =========================================================================
     # ALTERNATIVE MODE
     # Shown after the faculty member clicks "No, let's try again."
@@ -5016,18 +4953,7 @@ def render_resolving_issue():
                 "Re-exporting that Word file as PDF will produce a document with a "
                 "correct, consistent reading order."
             )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button(
-                    "Got it — apply it anyway",
-                    type="primary",
-                    use_container_width=True,
-                    key="alt_yes",
-                ):
-                    _apply_and_advance()
-            with col2:
-                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
-                    _skip_issue()
+            _docx_path_buttons()
 
         # --- color_only_cue: manual review required, no algorithmic fix ---
         elif issue["id"] == "color_only_cue":
@@ -5040,18 +4966,7 @@ def render_resolving_issue():
                 "symbol, or any other non-color indicator alongside it. Once you've "
                 "reviewed the document, you can acknowledge this issue and continue."
             )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button(
-                    "I've reviewed it — looks fine",
-                    type="primary",
-                    use_container_width=True,
-                    key="alt_yes",
-                ):
-                    _apply_and_advance()
-            with col2:
-                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
-                    _skip_issue()
+            _docx_path_buttons("I've reviewed it — looks fine")
 
         # --- inconsistent_list_tagging: explain DOCX conversion improves list structure ---
         elif issue["id"] == "inconsistent_list_tagging":
@@ -5063,18 +4978,7 @@ def render_resolving_issue():
                 "Re-exporting the Word file as PDF will carry the list structure into "
                 "the accessible PDF."
             )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button(
-                    "Got it — apply it anyway",
-                    type="primary",
-                    use_container_width=True,
-                    key="alt_yes",
-                ):
-                    _apply_and_advance()
-            with col2:
-                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
-                    _skip_issue()
+            _docx_path_buttons()
 
         # --- line_spacing_tight: explain the 1.5× line spacing fix in DOCX ---
         elif issue["id"] == "line_spacing_tight":
@@ -5086,18 +4990,7 @@ def render_resolving_issue():
                 "Re-exporting the Word file as PDF will carry the improved spacing "
                 "through automatically."
             )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button(
-                    "Got it — apply it anyway",
-                    type="primary",
-                    use_container_width=True,
-                    key="alt_yes",
-                ):
-                    _apply_and_advance()
-            with col2:
-                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
-                    _skip_issue()
+            _docx_path_buttons()
 
         # --- letter_spacing_tight: explain the tracking normalization fix ---
         elif issue["id"] == "letter_spacing_tight":
@@ -5109,18 +5002,7 @@ def render_resolving_issue():
                 "documents with naturally narrow typefaces. Review the output to "
                 "confirm the result looks right before finalizing."
             )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button(
-                    "Got it — apply it anyway",
-                    type="primary",
-                    use_container_width=True,
-                    key="alt_yes",
-                ):
-                    _apply_and_advance()
-            with col2:
-                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
-                    _skip_issue()
+            _docx_path_buttons()
 
         # --- excessive_text_colors: explain DOCX color normalization ---
         elif issue["id"] == "excessive_text_colors":
@@ -5133,18 +5015,7 @@ def render_resolving_issue():
                 "The original PDF is left unchanged. The simplified color palette only "
                 "applies to the downloaded Word file."
             )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button(
-                    "Got it — apply it anyway",
-                    type="primary",
-                    use_container_width=True,
-                    key="alt_yes",
-                ):
-                    _apply_and_advance()
-            with col2:
-                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
-                    _skip_issue()
+            _docx_path_buttons()
 
         # --- fallback for any issue type not explicitly handled above ---
         else:
@@ -5152,18 +5023,7 @@ def render_resolving_issue():
                 "This fix is applied automatically based on what we detected in your document. "
                 "If you're not sure about it, you can skip this issue for now and come back later."
             )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button(
-                    "Apply it anyway",
-                    type="primary",
-                    use_container_width=True,
-                    key="alt_yes",
-                ):
-                    _apply_and_advance()
-            with col2:
-                if st.button("Skip this issue for now", use_container_width=True, key="alt_skip"):
-                    _skip_issue()
+            _docx_path_buttons("Apply it anyway")
 
         _render_abandon_button()
         return
