@@ -107,7 +107,12 @@ These appear ABOVE the Abandon button, which is always the very last element.
     If the user chooses to stop, proceed to step 11.
     After every three issues have been resolved, offer a re-analysis before continuing
     (see Re-Analysis Check below).
-11. Ask the user whether they want their file saved as a DOCX or PDF, then deliver
+11. Present the Manual Review Checklist (see Manual Review Checklist below). This screen
+    surfaces accessibility issues that cannot be detected algorithmically — charts, video,
+    math notation, color-only cues, and others. The user can skip the whole screen or
+    work through each item. Items marked "Needs attention" show specific guidance but do
+    not block the download.
+12. Ask the user whether they want their file saved as a DOCX or PDF, then deliver
     the saved file with "_edited" appended to the original file name
     (e.g., lecture_notes.pdf → lecture_notes_edited.docx or lecture_notes_edited.pdf)
 
@@ -399,6 +404,9 @@ Defined Red Light issues:
   - Decorative or script fonts used for readable text
   - Font size too small for sustained reading
   - Any combination of the above
+  Detection: spans with font size < 9pt are counted; if they exceed 25% of the total
+  span count across the document, this issue is raised as Red. Between 1% and 25%
+  it is raised as Yellow (Moderate readability barrier, see below).
   Fix path: create a new document with corrected colors, fonts, and sizes applied.
   (WCAG 2.1 SC 1.4.3, 1.4.6; Title II 28 CFR Part 35)
 
@@ -603,6 +611,11 @@ Defined Yellow Light issues:
   encounters content differs from the order a sighted reader would follow on the page.
   Common in multi-column layouts, documents with sidebars, or PDFs exported from
   complex design applications.
+  Detection: `page.get_text("dict")` block y-centers are compared in sequence. A
+  backward jump is flagged when block[i] y-center is more than 25% of page height
+  above block[i-1], and both blocks are within 40% of page width of each other (same
+  column zone). Pages with ≥ 2 such violations are problem pages. Issue triggered when
+  ≥ 40% of pages with ≥ 4 text blocks are problem pages (minimum 2 pages checked).
   Fix path: reorder the content flow in a new document to match the intended reading
   sequence. (WCAG 2.1 SC 1.3.2; Title II 28 CFR Part 35)
 
@@ -617,6 +630,8 @@ Defined Yellow Light issues:
   impossible to read due to color/contrast failure, problematic font choice, or small
   font size, when the affected content totals less than 25% of the document. Above 25%
   this becomes a Red Light issue.
+  Detection: same span size < 9pt count as the severe check; 1%–25% of total spans
+  triggers this Yellow issue instead of Red.
   Fix path: create a new document with corrected colors, fonts, and sizes applied.
   (WCAG 2.1 SC 1.4.3; Title II 28 CFR Part 35)
 
@@ -625,6 +640,11 @@ Defined Yellow Light issues:
   are required," topic sections coded only by text color) without any other visual or
   textual indicator. Users who are color blind, have low vision, or are printing in
   black and white will miss that meaning entirely.
+  Detection: span color values are bucketed by non-black/non-white hue (RGB mean
+  brightness 40–215). Colors with ≥ 40 characters of text each are counted as
+  "meaningful." Exactly 2–5 such distinct colors → this Yellow issue. 6 or more →
+  `excessive_text_colors` (Green) instead. The two are mutually exclusive.
+  No automated fix is available — this issue requires manual review.
   Fix path: add a secondary indicator alongside the color — a label, symbol, pattern,
   or inline text — so the information is not lost when color is unavailable.
   (WCAG 2.1 SC 1.4.1; Title II 28 CFR Part 35)
@@ -653,6 +673,10 @@ Defined Green Light issues:
 - **Inconsistent list tagging** — Lists that are formatted visually (using dashes,
   asterisks, or manual indentation) but not tagged as actual lists in the document
   structure. Screen readers won't announce item count or list context.
+  Detection: a regex pattern matches lines that begin with a bullet, dash, asterisk,
+  numbered prefix, or lettered prefix. That visual count is compared to the number of
+  `DocItemLabel.LIST_ITEM` elements Docling found. Issue triggered when visual list
+  lines ≥ 8 and Docling's count is less than 50% of the visual count.
   Fix path: convert visually formatted lists to properly tagged list elements.
   (WCAG 2.1 SC 1.3.1; Title II 28 CFR Part 35)
 
@@ -660,13 +684,22 @@ Defined Green Light issues:
   insufficient line height, making the document harder to read — particularly for
   users with dyslexia or low vision. Not a strict WCAG AA requirement for static
   PDFs, but a meaningful readability improvement.
-  Fix path: apply increased line spacing in a new document.
+  Detection: for consecutive lines within each text block, inter-line distance
+  (next line's top y − current line's top y) divided by the current font size is
+  computed. Ratios below 1.10 indicate tight spacing. Single-line blocks and text
+  smaller than 7pt are excluded. Issue triggered when > 40% of qualifying line pairs
+  are tight.
+  Fix path: apply 1.5× line spacing to body text in the DOCX export.
   (Readability best practice; WCAG 2.1 SC 1.4.12 for reference)
 
 - **Letter spacing too tight** — Text uses compressed tracking that reduces
   legibility, especially for users with dyslexia. Not a strict WCAG AA requirement
   for static PDFs, but worth addressing.
-  Fix path: apply normal or slightly increased letter spacing in a new document.
+  Detection: span_width / (char_count × font_size) < 0.28 is the threshold. Spans
+  with fewer than 5 characters, font size < 8pt, or condensed typeface names (containing
+  "condense", "narrow", "compress", or "condens") are excluded. Issue triggered when
+  > 45% of qualifying spans are below the threshold.
+  Fix path: normalize letter spacing to each font's default tracking in the DOCX export.
   (Readability best practice; WCAG 2.1 SC 1.4.12 for reference)
 
 - **Excessive use of text colors** — The document uses many different text colors
@@ -674,8 +707,59 @@ Defined Green Light issues:
   meaningful information. Not a WCAG violation unless color is the sole means of
   conveying information (see Yellow), but it can significantly impair readability
   and focus.
-  Fix path: reduce text color variety to a small, intentional set in a new document.
+  Detection: same meaningful-color counter as `color_only_cue`; > 5 distinct non-black
+  colors with ≥ 40 characters of text each → this issue. Mutually exclusive with
+  `color_only_cue` — only one fires per document.
+  Fix path: reduce text color variety to a small, intentional set in the DOCX export.
   (Readability best practice)
+
+---
+
+## Manual Review Checklist
+
+Shown after all auto-detected issues are resolved (or when the user stops early),
+positioned between the issue list and the download format screen (workflow step 11).
+This screen surfaces accessibility problems that cannot be detected algorithmically —
+they require a human to evaluate the content.
+
+### When it appears
+- After the user resolves the last auto-detected issue and confirms they are done, OR
+- After the user chooses "No, I'm done for now" at the issue list
+
+### UI pattern
+- Intro text explains why these items matter and that the user can skip the whole
+  screen if they choose
+- Each item displays:
+  1. Plain-language explanation of what to check and why it matters
+  2. Two choices: **"Looks fine"** or **"Needs attention"**
+  3. If "Needs attention" is selected, specific guidance appears below the choice
+- A prominent **"Skip this checklist"** option is always available at the top
+- Users work through items in any order; the screen does not block the download
+
+### Checklist items
+
+| Issue | Severity | What to check |
+|-------|----------|---------------|
+| Charts, graphs, and diagrams | 🔴 Critical | Does the alt text describe the *data and meaning*, not just the visual? A bar chart description should say what the bars represent and what the key takeaway is. |
+| Embedded video or audio | 🔴 Critical | Is there a transcript or caption file? Can a student who can't hear the audio still access the content? |
+| Math and equations | 🔴 Critical | Are equations image-based (unreadable by screen readers) or text-based? Even text-based math notation (x², ∑) may not read correctly in all screen readers. |
+| Color as only cue for meaning | 🟡 Moderate | Is color used to signal something — required fields, categories, warnings — without any other indicator such as a label, symbol, or text? |
+| Non-descriptive link text | 🟡 Moderate | Do any links say "click here," "this link," or "read more" without context? Screen readers read link text in isolation, so the destination should be clear from the link text alone. |
+| Table structure correctness | 🟡 Moderate | Are header cells actually marked as headers, or just visually bold? Does the table read logically row by row without relying on visual layout? |
+| Abbreviations on first use | 🟢 Lower priority | Are acronyms and discipline-specific abbreviations spelled out the first time they appear? (e.g., "CUNY — City University of New York") |
+| Non-English passages | 🟢 Lower priority | Does the document include quotes or passages in another language? Those sections should have their own language tag so screen readers switch pronunciation rules. |
+| Decorative image verification | 🟢 Lower priority | Review any images the app auto-classified as decorative or removed as artifacts — confirm no content image was accidentally excluded. |
+
+### Guidance shown when "Needs attention" is selected
+
+Each item's "Needs attention" path provides specific, actionable next steps written
+in plain language — no jargon. Examples:
+- **Charts**: "Add or update the alt text for each chart to describe what the data
+  shows and what someone should take away from it. Avoid descriptions like 'bar chart'
+  — say what the bars measure and what the result means."
+- **Non-descriptive links**: "Go through the document and rewrite any link that says
+  'click here' or 'read more.' Replace it with the destination or topic, e.g.,
+  'CUNY Accessibility Toolkit' instead of 'click here.'"
 
 ---
 
