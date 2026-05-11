@@ -2389,6 +2389,7 @@ def init_state():
         "skipped_ids": [],          # Issue IDs the user explicitly skipped via the alternative path
         "showing_alternative": False,  # True when the post-rejection alternative UI is active
         "ocr_download_mode": False,    # True when user chose "download and review first" on OCR screen
+        "manual_review_results": {},   # {item_id: "ok" | "attention"} — responses on manual review screen
         "resolved_count": 0,        # Running count of resolved issues (drives re-analysis)
         "current_issue_id": None,   # ID of the issue currently being worked on
         "proposed_fix": None,       # Text of the fix shown during QA confirmation
@@ -3480,8 +3481,8 @@ def render_issue_list():
     ]
 
     if not remaining:
-        # All issues resolved — move to format selection
-        st.session_state.step = "choose_format"
+        # All issues resolved — go to manual review checklist before download
+        st.session_state.step = "manual_review"
         st.rerun()
         return
 
@@ -4807,13 +4808,13 @@ def render_continue_or_stop():
                 "No, I'm done for now.",
                 use_container_width=True,
             ):
-                st.session_state.step = "choose_format"
+                st.session_state.step = "manual_review"
                 st.rerun()
     else:
-        # No issues remaining — go straight to format selection
+        # No issues remaining — go to manual review checklist before download
         st.markdown("You've worked through all the issues — great job!")
         if st.button("Continue to download", type="primary"):
-            st.session_state.step = "choose_format"
+            st.session_state.step = "manual_review"
             st.rerun()
 
     _render_abandon_button()
@@ -4880,6 +4881,183 @@ def render_re_analysis():
             st.rerun()
 
     _render_abandon_button()
+
+
+# -----------------------------------------------------------------------------
+# STEP: manual_review
+# A checklist of accessibility issues that can't be detected automatically.
+# Shown after all auto-detected issues are resolved, before the download screen.
+# Faculty can check each item, mark things that need attention, and read
+# plain-language guidance — or skip the whole screen if they choose.
+# -----------------------------------------------------------------------------
+def render_manual_review():
+    """
+    Purpose: Surface accessibility issues that require human judgment.
+    These are real WCAG 2.1 / Title II problems the app cannot detect
+    algorithmically. Faculty review each item and mark it OK or needing attention.
+    """
+    # Checklist items — defined here since they are only used by this function.
+    # Each item has: id, severity, title, a "what to check" prompt, and guidance
+    # shown when the faculty member flags something as needing attention.
+    ITEMS = [
+        {
+            "id":       "charts_graphs",
+            "severity": "red",
+            "title":    "Charts, graphs, and diagrams",
+            "check":    "Does the alt text for each chart describe the data and key takeaway — not just the visual appearance? A description should say what the data shows and what conclusion to draw, not just 'bar chart.'",
+            "guidance": "Revisit the alt text for each chart or graph. Describe the main finding or trend — your students who can't see the image should understand the point it makes, not just that a chart exists.",
+        },
+        {
+            "id":       "video_audio",
+            "severity": "red",
+            "title":    "Embedded video or audio",
+            "check":    "Does your document include any embedded video or audio clips? If so, do they have captions or a written transcript?",
+            "guidance": "Add a written transcript or caption file to any audio or video content before sharing. Students who are deaf or hard of hearing cannot access that content without one.",
+        },
+        {
+            "id":       "math_equations",
+            "severity": "red",
+            "title":    "Math and equations",
+            "check":    "Are equations embedded as images, or typed as text? Even typed math notation (x², ∑, ∫) may not be read correctly by all screen readers.",
+            "guidance": "For documents with significant math content, consider providing a written description of what each equation represents, or use MathType/LaTeX formatting. Image-based equations need alt text that explains their meaning, not just their appearance.",
+        },
+        {
+            "id":       "color_only_cue",
+            "severity": "yellow",
+            "title":    "Color used as the only cue for meaning",
+            "check":    "Does your document use color to signal something important — like red text for required items, or color-coded categories — without any other indicator like a label, symbol, or text?",
+            "guidance": "Add a text label, symbol, or pattern alongside any color-coded elements. For example: 'Required *' instead of red text alone. Students who are color blind or printing in black and white will miss color-only signals entirely.",
+        },
+        {
+            "id":       "link_text",
+            "severity": "yellow",
+            "title":    "Non-descriptive link text",
+            "check":    "Do any links say 'click here,' 'this link,' or 'read more'? Screen readers read link text in isolation, without the surrounding sentence for context.",
+            "guidance": "Edit link text to describe the destination. Instead of 'click here for the syllabus,' write 'Fall 2025 Course Syllabus.' This helps screen reader users understand where each link goes.",
+        },
+        {
+            "id":       "table_structure",
+            "severity": "yellow",
+            "title":    "Table structure and headers",
+            "check":    "Do your tables have proper header rows — actually marked as headers in the document, not just visually bold? Does each table still make sense when read row by row?",
+            "guidance": "In your source document, mark header rows using the built-in table header option — not bold formatting. Re-export as PDF to carry the structure through. Screen readers read tables cell by cell and rely on headers to give each cell meaning.",
+        },
+        {
+            "id":       "abbreviations",
+            "severity": "green",
+            "title":    "Abbreviations and acronyms",
+            "check":    "Are discipline-specific abbreviations and acronyms spelled out the first time they appear?",
+            "guidance": "Add a brief definition on first use (e.g., 'CUNY — City University of New York'), or include a glossary at the end of the document. This helps all readers, not just those using assistive technology.",
+        },
+        {
+            "id":       "non_english",
+            "severity": "green",
+            "title":    "Non-English passages",
+            "check":    "Does your document include any quotes or passages in a different language? Those sections may be read aloud with incorrect pronunciation by screen readers.",
+            "guidance": "In Word: select the non-English text → Review → Language → Set Proofing Language. This tells screen readers to switch to the correct speech engine for that passage.",
+        },
+        {
+            "id":       "decorative_images",
+            "severity": "green",
+            "title":    "Decorative image verification",
+            "check":    "If this document had images, review any the app auto-classified as decorative or removed as scan artifacts. Was anything accidentally excluded that students need to see?",
+            "guidance": "Compare the images in your original file with the output. If a content image was removed or incorrectly marked decorative, you can re-upload and work through the image workflow again.",
+        },
+    ]
+
+    SEVERITY_LABEL = {
+        "red":    "🔴 Red Light",
+        "yellow": "🟡 Yellow Light",
+        "green":  "🟢 Green Light",
+    }
+
+    st.title("♿ PDF Assistant")
+    st.divider()
+
+    st.markdown("### One more step — a quick manual check")
+    st.markdown(
+        "There are a few things I can't verify automatically. This should only take "
+        "a minute — just a quick look at your document for each item below."
+    )
+
+    # Ensure results dict exists in session state
+    if "manual_review_results" not in st.session_state:
+        st.session_state.manual_review_results = {}
+
+    results = st.session_state.manual_review_results
+
+    for item in ITEMS:
+        item_id  = item["id"]
+        result   = results.get(item_id)
+
+        st.divider()
+
+        # Header: severity + title + status icon
+        status = " ✓" if result == "ok" else " ⚠️" if result == "attention" else ""
+        st.markdown(
+            f"**{SEVERITY_LABEL[item['severity']]} — {item['title']}**{status}"
+        )
+        st.caption(item["check"])
+
+        if result is None:
+            # Not yet reviewed — show the two response buttons
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Looks fine ✓",
+                    key=f"mr_ok_{item_id}",
+                    use_container_width=True,
+                ):
+                    st.session_state.manual_review_results[item_id] = "ok"
+                    st.rerun()
+            with col2:
+                if st.button(
+                    "Needs attention ⚠️",
+                    key=f"mr_att_{item_id}",
+                    use_container_width=True,
+                ):
+                    st.session_state.manual_review_results[item_id] = "attention"
+                    st.rerun()
+
+        elif result == "attention":
+            # Show guidance and let them mark as done
+            st.info(item["guidance"])
+            if st.button(
+                "Got it — mark as reviewed",
+                key=f"mr_done_{item_id}",
+            ):
+                st.session_state.manual_review_results[item_id] = "ok"
+                st.rerun()
+
+        # result == "ok": checkmark already shown in header, nothing else needed
+
+    st.divider()
+
+    reviewed = len(results)
+    total    = len(ITEMS)
+    if reviewed < total:
+        st.caption(f"{reviewed} of {total} items reviewed")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(
+            "Continue to download →",
+            type="primary",
+            use_container_width=True,
+            key="mr_continue",
+        ):
+            st.session_state.step = "choose_format"
+            st.rerun()
+    with col2:
+        if st.button(
+            "Skip this step",
+            use_container_width=True,
+            key="mr_skip",
+        ):
+            st.session_state.step = "choose_format"
+            st.rerun()
+
+    _render_go_back("issue_list")
 
 
 # -----------------------------------------------------------------------------
@@ -5035,6 +5213,7 @@ STEP_HANDLERS = {
     "resolving_issue":      render_resolving_issue,
     "continue_or_stop":     render_continue_or_stop,
     "re_analysis":          render_re_analysis,
+    "manual_review":        render_manual_review,
     "choose_format":        render_choose_format,
     "done":                 render_done,
 }
