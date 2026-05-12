@@ -2791,58 +2791,186 @@ with st.sidebar:
 # The starting screen. Shows a file uploader. When a PDF is uploaded,
 # store the file data in session state and move to "analyzing".
 # -----------------------------------------------------------------------------
+def render_step_card(number, title, description):
+    """
+    Render a styled step card for the 'How it works' section.
+    Reusable: pass a step number, short title, and description text.
+    """
+    st.markdown(
+        f"""
+        <div style='
+            background-color: #F2F2F2;
+            border-left: 4px solid #F0AB00;
+            border-radius: 6px;
+            padding: 16px 20px 20px 20px;
+            height: 100%;
+        '>
+            <div style='
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 10px;
+            '>
+                <div style='
+                    flex-shrink: 0;
+                    background-color: #862334;
+                    color: white;
+                    font-weight: 700;
+                    font-size: 1rem;
+                    border-radius: 50%;
+                    width: 40px;
+                    height: 40px;
+                    line-height: 40px;
+                    text-align: center;
+                '>{number}</div>
+                <p style='
+                    color: #862334;
+                    font-weight: 600;
+                    font-size: 1rem;
+                    margin: 0;
+                '>{title}</p>
+            </div>
+            <p style='
+                color: #1A1A1A;
+                font-size: 0.9rem;
+                margin: 0;
+            '>{description}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_upload():
     """
-    Purpose: Let the user upload a PDF.
-    WCAG reference: File upload control has an accessible label (SC 1.3.1).
+    Purpose: Landing page — introduce the tool, show who made it, then let
+    the user upload a PDF. WCAG 2.2 SC 1.3.1: file upload has an accessible label.
     """
-    st.title("♿ PDF Assistant")
-    st.markdown(
-        "Upload a course PDF and I'll check it for accessibility issues that may "
-        "create barriers for your students. I'll walk you through any fixes step by step."
-    )
-    st.divider()
+    # ------------------------------------------------------------------
+    # BC brand color constants used for inline HTML/CSS accents.
+    # Streamlit's config.toml controls the global theme; these let us
+    # apply maroon and gold to specific markdown elements where needed.
+    # ------------------------------------------------------------------
+    BC_MAROON = "#862334"
+    BC_GOLD   = "#F0AB00"
+    BC_GRAY   = "#58595B"
 
-    # Copyright acknowledgment — must be checked before a file can be uploaded.
-    copyright_acknowledged = st.checkbox(
-        "I acknowledge that the file I am uploading is my own work or that I have "
-        "the right to use it, and that I take full responsibility for ensuring it "
-        "is free from copyright restrictions. This tool assumes all uploaded materials "
-        "are used legitimately and bears no responsibility for copyright infringement.",
-        key="copyright_ack",
-    )
+    import os
+    logo_path = os.path.join(os.path.dirname(__file__), "BC-logo.png")
 
-    uploaded_file = st.file_uploader(
-        label="Choose a PDF file to check",
-        type=["pdf"],
-        help="Upload the course PDF you want to review for accessibility issues.",
-        key="pdf_uploader",
-        disabled=not copyright_acknowledged,
-    )
+    # ------------------------------------------------------------------
+    # All content sits in the left 6/7 of the screen; the rightmost 1/7
+    # is intentionally blank — equivalent to a [2, 2, 2, 1] column split.
+    # ------------------------------------------------------------------
+    col_main, col_blank = st.columns([6, 1])
+    with col_main:
 
-    if not copyright_acknowledged:
-        st.caption("Please check the box above to enable file upload.")
-    else:
-        # Processing time notice — shown once the uploader is enabled so faculty
-        # know upfront that analysis can take a few minutes for larger files.
-        # st.caption() renders in smaller, muted text — appropriate for a
-        # supplementary note that shouldn't compete with the uploader itself.
-        st.caption(
-            "Once you upload your file, it may take a few minutes to analyze "
-            "depending on its size. Large files can take 5 minutes or more. "
-            "Please be patient — the tool is working."
+        # Header — logo inline with tool name
+        col_logo, col_title = st.columns([1, 6])
+        with col_logo:
+            if os.path.exists(logo_path):
+                st.image(logo_path, width=120)
+        with col_title:
+            st.markdown(
+                f"<h2 style='color:{BC_MAROON}; margin:0; padding-top:6px; line-height:1.2;'>"
+                "PDF Accessibility Assistant</h2>"
+                f"<p style='color:{BC_GRAY}; margin:2px 0 0 0; font-size:0.85rem;'>"
+                "Brooklyn College Academic IT &nbsp;|&nbsp; City University of New York</p>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown(
+            f"<hr style='border:none; border-top:2px solid {BC_GRAY}; margin:10px 0 16px 0;'>",
+            unsafe_allow_html=True,
         )
 
-    if uploaded_file is not None and copyright_acknowledged:
-        # Store the file name and raw bytes in session state so we can
-        # access them in later steps even after Streamlit re-renders.
-        # working_pdf_bytes starts as an exact copy of the original and is
-        # updated in-place as each fix is confirmed — the original is never touched.
-        st.session_state.file_name = uploaded_file.name.strip()
-        st.session_state.file_bytes = uploaded_file.read()
-        st.session_state.working_pdf_bytes = st.session_state.file_bytes
-        st.session_state.step = "analyzing"
-        st.rerun()
+        # About
+        st.markdown(
+            "This tool helps Brooklyn College and CUNY faculty find and fix accessibility "
+            "problems in course PDF materials. It uses a **human-in-the-loop** approach — "
+            "providing remediation guidance and empowering faculty to make informed decisions "
+            "about their course content. PDFs are evaluated using **WCAG 2.2 Level AA** standards."
+        )
+
+        # How it works — three step cards
+        st.markdown(
+            f"<p style='color:{BC_MAROON}; font-weight:600; margin:12px 0 8px 0;'>"
+            "How it works</p>",
+            unsafe_allow_html=True,
+        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            render_step_card("1", "Upload", "Choose a course PDF from your computer.")
+        with c2:
+            render_step_card("2", "Analyze", "The tool checks for issues and explains what it found.")
+        with c3:
+            render_step_card("3", "Fix & Download", "Work through each issue, then download the remediated file.")
+
+        st.info(
+            "**NYS compliance deadline:** CUNY must meet WCAG 2.2 Level AA by "
+            "**January 1, 2027** under Title II of the ADA.",
+            icon="📅",
+        )
+
+        st.divider()
+
+        # Copyright acknowledgment (left) and file uploader (right) side by side
+        ack_col, upload_col = st.columns([1, 2])
+        with ack_col:
+            st.markdown(
+                """
+                <style>
+                [data-testid="stCheckbox"] {
+                    padding-left: 1em;
+                    padding-right: 1em;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+            copyright_acknowledged = st.checkbox(
+                "I confirm I have the right to upload this file and assume full "
+                "responsibility for its content. PDF Assistant is not responsible "
+                "for any copyrighted materials.",
+                key="copyright_ack",
+            )
+            if not copyright_acknowledged:
+                st.markdown(
+                    "<p style='color:#862334; font-size:14pt; margin-top:6px;'>"
+                    "Important: please check the box to enable file upload.</p>",
+                    unsafe_allow_html=True,
+                )
+        with upload_col:
+            st.markdown(
+                f"<h3 style='color:{BC_MAROON}; margin:0 0 0 0;'>Choose a PDF file to check</h3>",
+                unsafe_allow_html=True,
+            )
+            uploaded_file = st.file_uploader(
+                label="Choose a PDF file to check",
+                type=["pdf"],
+                help="Upload the course PDF you want to review for accessibility issues.",
+                key="pdf_uploader",
+                disabled=not copyright_acknowledged,
+                label_visibility="hidden",
+            )
+            if copyright_acknowledged:
+                st.caption(
+                    "Once you upload your file, it may take a few minutes to analyze "
+                    "depending on its size. Large files can take 5 minutes or more. "
+                    "Please be patient — the tool is working."
+                )
+
+        if uploaded_file is not None and copyright_acknowledged:
+            # Store the file name and raw bytes in session state so we can
+            # access them in later steps even after Streamlit re-renders.
+            # working_pdf_bytes starts as an exact copy of the original and is
+            # updated in-place as each fix is confirmed — the original is never touched.
+            st.session_state.file_name = uploaded_file.name.strip()
+            st.session_state.file_bytes = uploaded_file.read()
+            st.session_state.working_pdf_bytes = st.session_state.file_bytes
+            st.session_state.step = "analyzing"
+            st.rerun()
+
 
 
 # -----------------------------------------------------------------------------
@@ -5750,6 +5878,34 @@ STEP_HANDLERS = {
     "done":                 render_done,
 }
 
+# Global style overrides — applied once per render, affect all screens.
+st.markdown(
+    """
+    <style>
+    h1 {
+        font-size: 2rem !important;
+    }
+    h3 {
+        color: #862334 !important;
+        font-size: 1.25rem !important;
+    }
+    [data-testid="stFileUploader"] {
+        margin-top: 0 !important;
+    }
+    [data-testid="stFileUploaderDropzone"] {
+        border: 2px solid #862334 !important;
+        border-radius: 6px !important;
+        min-height: 120px !important;
+        margin-top: 0 !important;
+    }
+    [data-testid="stFileUploader"] .stMarkdown {
+        margin-bottom: 0 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Call the render function for the current step.
 # If somehow step is set to an unknown value, fall back to upload.
 handler = STEP_HANDLERS.get(st.session_state.step, render_upload)
@@ -5766,4 +5922,15 @@ st.caption(
     "PDF Assistant supports compliance with **Title II of the ADA** (28 CFR Part 35) "
     "and **WCAG 2.2 Level AA**. It provides guidance and analysis but does not "
     "constitute legal advice. Always consult your institution's accessibility office."
+)
+st.markdown(
+    "<p style='color:#58595B; font-size:0.8rem; margin-top:4px;'>"
+    "Developed by "
+    "<a href='mailto:mgluzman@brooklyn.cuny.edu' style='color:#862334;'>"
+    "<strong>Mariya Gluzman</strong></a>, Instructional Designer, "
+    "Brooklyn College Academic IT &nbsp;·&nbsp; "
+    "Built in collaboration with <strong>Claude Code</strong> (Anthropic) &nbsp;·&nbsp; "
+    "<a href='https://creativecommons.org/licenses/by-nc-sa/4.0/' style='color:#58595B;' "
+    "target='_blank'>CC BY-NC-SA 4.0</a></p>",
+    unsafe_allow_html=True,
 )
