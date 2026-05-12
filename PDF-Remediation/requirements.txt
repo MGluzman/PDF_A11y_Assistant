@@ -102,6 +102,25 @@ python-docx>=1.1.0         # Create and write DOCX files (OCR and remediation ou
 
 
 # -----------------------------------------------------------------------------
+# AI-POWERED PDF STRUCTURE ANALYSIS
+# Docling (IBM Research) is used to extract rich structural data from PDFs:
+# headings, reading order, images (PICTURE detections), lists, and tables.
+# It serves as the primary analysis engine; PyMuPDF is the fallback.
+# -----------------------------------------------------------------------------
+docling>=2.93.0
+
+
+# -----------------------------------------------------------------------------
+# PDF CONVERSION — DOCX → ACCESSIBLE PDF
+# docx2pdf drives Microsoft Word (Windows) or LibreOffice (Mac/Linux) to
+# export the remediated DOCX as a properly tagged, accessible PDF. This is
+# the only reliable way to preserve heading structure, image alt text, and
+# reading order in the PDF output — pure-Python PDF libraries cannot do this.
+# -----------------------------------------------------------------------------
+docx2pdf>=0.1.8
+
+
+# -----------------------------------------------------------------------------
 # OPTIONAL — AI-ASSISTED ALT TEXT GENERATION (can be enabled later)
 # Uncomment the line below if you want to use OpenAI's vision model to
 # automatically suggest alt text for images found in PDFs.

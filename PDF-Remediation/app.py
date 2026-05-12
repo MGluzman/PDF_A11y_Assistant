@@ -37,13 +37,15 @@ import streamlit as st       # The main framework — builds the entire UI
 from langdetect import detect as detect_language  # Detects the written language of extracted text
 from PIL import Image        # Pillow — convert PyMuPDF pixel data to images pytesseract can read
 from docx import Document as DocxDocument   # python-docx — builds DOCX output files
-from docx.shared import Pt                  # Point sizes for DOCX styles
+from docx.shared import Pt, Inches          # Point sizes and inch measurements for DOCX styles
+from docx.oxml.ns import qn                 # Qualified XML name helper — used to set image alt text attributes
 from reportlab.lib.pagesizes import letter  # ReportLab — builds PDF output files
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
 from docling.document_converter import DocumentConverter  # Docling — ML-powered document structure analysis
 from docling_core.types.doc import DocItemLabel           # Semantic element type labels (heading, list, table, etc.)
+from docx2pdf import convert as docx2pdf_convert          # Converts DOCX → PDF via Microsoft Word (Windows COM)
 
 
 # ---------------------------------------------------------------------------
@@ -2364,6 +2366,55 @@ def analyze_pdf(file_bytes):
 # =============================================================================
 # DOCX OUTPUT BUILDER — Phase 2
 # =============================================================================
+# -----------------------------------------------------------------------------
+# _embed_image_with_alt_text()
+# Embeds an image into a DOCX document and writes the alt text into the Word
+# alt text field so screen readers and Word's built-in accessibility checker
+# can find it. This satisfies WCAG 2.2 SC 1.1.1 at the DOCX level, so that
+# when the faculty member re-exports to PDF the alt text carries through.
+# -----------------------------------------------------------------------------
+def _embed_image_with_alt_text(doc_out, img_bytes, alt_text):
+    """
+    Add an image to the DOCX document with proper alt text set on the
+    underlying OOXML element.
+
+    Word stores alt text in the 'descr' attribute of the <wp:docPr> element
+    inside the drawing's inline block:
+        w:r > w:drawing > wp:inline > wp:docPr[descr="..."]
+
+    Setting this attribute is what populates Word's "Alt Text" panel and
+    what gets written into the PDF structure tree when the faculty member
+    uses "Export to PDF" in Word or Google Docs.
+
+    Parameters:
+        doc_out   (DocxDocument): The document being built.
+        img_bytes (bytes):        Raw image bytes (PNG or JPEG).
+        alt_text  (str):          Alt text description. Pass "" for decorative
+                                  images — screen readers will skip them.
+
+    Returns:
+        bool: True if embedding succeeded, False if it failed (caller can fall
+              back to a text placeholder).
+    """
+    try:
+        para = doc_out.add_paragraph()
+        run  = para.add_run()
+        run.add_picture(io.BytesIO(img_bytes), width=Inches(5))
+
+        # Walk the OOXML tree to reach wp:docPr and set its 'descr' attribute.
+        # The tree is: <w:r> → <w:drawing> → <wp:inline> → <wp:docPr descr="">
+        drawing = run._element.find(qn("w:drawing"))
+        if drawing is not None:
+            inline = drawing.find(qn("wp:inline"))
+            if inline is not None:
+                doc_pr = inline.find(qn("wp:docPr"))
+                if doc_pr is not None:
+                    doc_pr.set("descr", alt_text)
+        return True
+    except Exception:
+        return False
+
+
 # build_docx_from_pdf() extracts text and structure from the working PDF and
 # produces a properly styled DOCX file using python-docx.
 #
@@ -2439,25 +2490,17 @@ def build_docx_from_pdf(pdf_bytes):
                 if all(alt_results.get(k, {}).get("type") in REMOVED_TYPES for k in keys)
             }
 
-            # Build a page → [approved descriptions] mapping for informational images.
-            # Docling PICTURE items have a page number but no xref, so we group
-            # approved descriptions by page and consume them in order as PICTURE
-            # items are encountered during iterate_items().
-            #
-            # Why a list per page? A page can have multiple informational images.
-            # Popping from the front (index 0) preserves the xref order from the
-            # alt text workflow, which follows reading order left-to-right, top-to-bottom.
-            descriptions_by_page: dict[int, list[str]] = {}
-            for xref, entry in alt_results.items():
-                if (
-                    entry.get("type") in INFORMATIONAL_TYPES
-                    and entry.get("alt_text", "").strip()
-                ):
-                    pg = entry.get("page")
-                    if pg is not None:
-                        descriptions_by_page.setdefault(pg, []).append(
-                            entry["alt_text"].strip()
-                        )
+            # Build a page → ordered list of image metadata for ALL images on
+            # that page. When Docling yields PICTURE items during iterate_items(),
+            # we pop from the front of each page's list so that the i-th Docling
+            # PICTURE corresponds to the i-th image discovered by analyze_pdf().
+            # This preserves reading order (left→right, top→bottom) which is how
+            # both Docling and analyze_pdf() traverse the page.
+            images_by_page: dict[int, list] = {}
+            for img_meta in alt_images:
+                pg = img_meta.get("page")
+                if pg is not None:
+                    images_by_page.setdefault(pg, []).append(img_meta)
 
             # iterate_items() walks the document in reading order and yields
             # (item, level) tuples. The level is nesting depth, not heading level.
@@ -2493,33 +2536,63 @@ def build_docx_from_pdf(pdf_bytes):
                     doc_out.add_paragraph("[Table — see original PDF for layout]")
 
                 elif label == DocItemLabel.PICTURE:
-                    # Skip picture placeholders for pages where every image was
-                    # marked as an artifact or background during the alt text
-                    # workflow. Pages with mixed content (some real, some removed)
-                    # still get a placeholder — we can't tell which Docling picture
-                    # item corresponds to which xref.
                     item_page = item.prov[0].page_no if item.prov else None
                     if item_page in fully_excluded_pages:
                         continue
 
                     page_num = item_page or "?"
 
-                    # Look up an approved description for this page.
-                    # Pop from the front so each PICTURE item on the same page
-                    # gets its own unique description rather than the same one repeated.
-                    page_descs = descriptions_by_page.get(item_page, [])
-                    if page_descs:
-                        approved_text = page_descs.pop(0)
-                        # Write the description as the alt text for this image.
-                        # Format: "[Image, page N: <approved description>]"
-                        # This makes the description visible and searchable in Word,
-                        # satisfying WCAG 2.2 SC 1.1.1 for documents that will be
-                        # re-exported to PDF.
-                        doc_out.add_paragraph(
-                            f"[Image, page {page_num}: {approved_text}]"
-                        )
-                    else:
+                    # Pop the next image metadata for this page so each Docling
+                    # PICTURE item is matched 1-to-1 with the image analyze_pdf()
+                    # found in the same reading order.
+                    page_imgs = images_by_page.get(item_page, [])
+                    img_meta  = page_imgs.pop(0) if page_imgs else None
+
+                    if img_meta is None:
+                        # Docling found a PICTURE item but analyze_pdf() has no
+                        # corresponding image for this page — add a plain placeholder.
                         doc_out.add_paragraph(f"[Image — page {page_num} of original PDF]")
+                        continue
+
+                    img_key  = img_meta.get("img_key")
+                    entry    = alt_results.get(img_key, {})
+                    img_type = entry.get("type", "")
+
+                    # Artifacts and backgrounds are excluded from the output.
+                    if img_type in REMOVED_TYPES:
+                        continue
+
+                    # Extract the actual image bytes so we can embed the real image.
+                    img_bytes_raw, _ = extract_image_by_source(pdf_bytes, img_meta)
+
+                    if img_bytes_raw:
+                        # Determine the alt text to embed.
+                        # Informational images → approved description.
+                        # Decorative images → empty string (screen readers skip them).
+                        # Unreviewed / skipped → empty string (better than a wrong description).
+                        if img_type in INFORMATIONAL_TYPES:
+                            alt_str = entry.get("alt_text", "").strip()
+                        else:
+                            alt_str = ""
+
+                        # Embed the image with the alt text attribute set on wp:docPr.
+                        # This is the field Word and Google Docs read as "Alt Text"
+                        # and that carries through when the file is exported to PDF.
+                        # WCAG 2.2 SC 1.1.1 — Non-text Content.
+                        if not _embed_image_with_alt_text(doc_out, img_bytes_raw, alt_str):
+                            # Embedding failed — fall back to a visible text description.
+                            if alt_str:
+                                doc_out.add_paragraph(f"[Image, page {page_num}: {alt_str}]")
+                            else:
+                                doc_out.add_paragraph(f"[Image — page {page_num} of original PDF]")
+                    else:
+                        # Could not extract image bytes — write a text placeholder
+                        # so the description is at least present in the document.
+                        alt_str = entry.get("alt_text", "").strip() if img_type in INFORMATIONAL_TYPES else ""
+                        if alt_str:
+                            doc_out.add_paragraph(f"[Image, page {page_num}: {alt_str}]")
+                        else:
+                            doc_out.add_paragraph(f"[Image — page {page_num} of original PDF]")
 
                 elif label in (DocItemLabel.TEXT, DocItemLabel.PARAGRAPH):
                     # Standard body text paragraph.
@@ -2555,11 +2628,14 @@ def build_docx_from_pdf(pdf_bytes):
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        # Build a flat img_key → alt_text_results entry lookup.
-        # alt_results may contain both int keys (pymupdf xrefs) and string keys
-        # (docling img_keys). Only int keys correspond to XObjects accessible via
-        # page.get_images(); string keys are filtered out in the per-image loop.
+        # Build flat lookup dicts keyed by img_key (xref for pymupdf images).
+        # xref_to_entry  → classification/alt text results for each image.
+        # xref_to_meta   → image metadata needed by extract_image_by_source().
         xref_to_entry = {k: entry for k, entry in alt_results.items()}
+        xref_to_meta  = {
+            m.get("img_key", m.get("xref")): m
+            for m in alt_images
+        }
 
         # Determine body text size by finding the most frequently used font size.
         all_sizes = []
@@ -2602,47 +2678,55 @@ def build_docx_from_pdf(pdf_bytes):
                         doc_out.add_paragraph(line_text)
 
             # ----------------------------------------------------------
-            # After text blocks: emit alt text for images on this page.
-            # page.get_images(full=True) returns one tuple per image XObject,
-            # with the xref at index 0 — the same key used in alt_text_results.
-            #
-            # This adds image descriptions at the end of each page's content.
-            # Inline positioning is not possible with the font-size heuristic
-            # path, but all approved descriptions are preserved in the output.
+            # After text blocks: embed images for this page.
+            # page.get_images(full=True) returns one tuple per XObject;
+            # xref is at index 0 — the same key used in alt_text_results.
+            # Images appear after the page's text because the font-size
+            # heuristic path can't determine exact inline positions.
+            # WCAG 2.2 SC 1.1.1 — Non-text Content.
             # ----------------------------------------------------------
             for img in page.get_images(full=True):
-                xref  = img[0]
-                entry = xref_to_entry.get(xref, {})
+                xref     = img[0]
+                entry    = xref_to_entry.get(xref, {})
                 img_type = entry.get("type", "")
 
                 if img_type in REMOVED_TYPES:
-                    # Artifact, background, or edge artifact — skip entirely.
+                    # Artifact, background, or edge artifact — exclude entirely.
                     continue
 
-                if img_type == "decorative":
-                    # Decorative images get empty alt text in the final PDF.
-                    # No visible placeholder is needed in the Word document.
-                    continue
+                img_meta = xref_to_meta.get(xref)
+                img_bytes_raw = None
+                if img_meta:
+                    img_bytes_raw, _ = extract_image_by_source(pdf_bytes, img_meta)
 
-                alt_text = entry.get("alt_text", "").strip()
+                if img_bytes_raw:
+                    # Determine alt text string.
+                    # Informational → approved description.
+                    # Decorative → empty string (screen readers skip the image).
+                    # Unreviewed/skipped → empty string.
+                    if img_type in INFORMATIONAL_TYPES:
+                        alt_str = entry.get("alt_text", "").strip()
+                    else:
+                        alt_str = ""
 
-                if alt_text:
-                    # Approved description from the alt text workflow.
-                    # Format matches the Docling path for consistency.
-                    doc_out.add_paragraph(
-                        f"[Image, page {page_num + 1}: {alt_text}]"
-                    )
-                elif img_type in INFORMATIONAL_TYPES:
-                    # Image was classified as informational but description
-                    # was not saved (e.g., the workflow was abandoned mid-way).
-                    doc_out.add_paragraph(
-                        f"[Image, page {page_num + 1}: description not provided]"
-                    )
+                    if not _embed_image_with_alt_text(doc_out, img_bytes_raw, alt_str):
+                        # Embedding failed — fall back to a visible text description.
+                        if alt_str:
+                            doc_out.add_paragraph(
+                                f"[Image, page {page_num + 1}: {alt_str}]"
+                            )
                 else:
-                    # Image was never reviewed — generic placeholder.
-                    doc_out.add_paragraph(
-                        f"[Image — page {page_num + 1} of original PDF]"
-                    )
+                    # No image bytes available — write text description so the
+                    # content is not silently lost.
+                    alt_str = entry.get("alt_text", "").strip() if img_type in INFORMATIONAL_TYPES else ""
+                    if alt_str:
+                        doc_out.add_paragraph(
+                            f"[Image, page {page_num + 1}: {alt_str}]"
+                        )
+                    elif img_type not in ("decorative",):
+                        doc_out.add_paragraph(
+                            f"[Image — page {page_num + 1} of original PDF]"
+                        )
 
         doc.close()
 
@@ -2699,6 +2783,8 @@ def init_state():
                                     # build_docx_from_pdf() can use it without re-converting
         "edited_docx_bytes": None,  # Cached DOCX output from build_docx_from_pdf() — built
                                     # once on first render of choose_format, reused on reruns
+        "edited_pdf_bytes":  None,  # Cached PDF output from _convert_docx_to_pdf() — built
+                                    # only if the faculty member requests PDF conversion
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -4072,14 +4158,19 @@ def _render_image_nav_buttons(index, total, img_key, current, results):
             use_container_width=True,
             key=f"nav_skip_{index}",
         ):
-            # Record as skipped so the summary can flag it.
-            results[img_key] = {
-                "type": "skipped",
-                "severity": "green",
-                "alt_text": "",
-                "page": current["page"],
-            }
-            st.session_state.alt_text_results = results
+            # Only mark as skipped if no complete classification exists yet.
+            # Preserves alt text the faculty member already entered if they are
+            # navigating back through previously reviewed images.
+            _COMPLETE = {"decorative", "artifact", "background",
+                         "edge_artifact", "critical", "supplementary"}
+            if results.get(img_key, {}).get("type") not in _COMPLETE:
+                results[img_key] = {
+                    "type": "skipped",
+                    "severity": "green",
+                    "alt_text": "",
+                    "page": current["page"],
+                }
+                st.session_state.alt_text_results = results
             _advance_alt_text_image()
 
     with nav_cols[2]:
@@ -4444,6 +4535,51 @@ def render_image_alt_text():
     # Per CLAUDE.md: three options. Show auto-classification badge if available.
     # -------------------------------------------------------------------------
     if phase == "question_1":
+        # If this image was already classified in a previous pass (e.g., the
+        # faculty member went back from the summary to review), show the existing
+        # result and let them keep or change it — don't force re-classification.
+        # This prevents "Skip this image" from silently erasing completed work.
+        COMPLETE_TYPES = {"decorative", "artifact", "background", "edge_artifact",
+                          "critical", "supplementary"}
+        existing_result = results.get(img_key, {})
+        if existing_result.get("type") in COMPLETE_TYPES:
+            kind = existing_result["type"]
+            alt  = existing_result.get("alt_text", "")
+            label_map = {
+                "decorative":    "Decorative — no description needed",
+                "artifact":      "Scan artifact — will be excluded from output",
+                "background":    "Page background — will be excluded from output",
+                "edge_artifact": "Edge artifact — will be excluded from output",
+                "critical":      f"Critical — description saved: \"{alt}\"",
+                "supplementary": f"Supplementary — description saved: \"{alt}\"",
+            }
+            st.success(f"✓ Already classified: **{label_map.get(kind, kind)}**")
+            st.markdown(
+                "You already made a decision for this image. "
+                "You can keep it and move on, or change it."
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    "Keep this — move on",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"q1_keep_{index}",
+                ):
+                    _advance_alt_text_image()
+            with col2:
+                if st.button(
+                    "Change it",
+                    use_container_width=True,
+                    key=f"q1_change_{index}",
+                ):
+                    # Clear the saved result so the normal classification flow runs.
+                    results.pop(img_key, None)
+                    st.session_state.alt_text_results = results
+                    st.rerun()
+            _render_image_nav_buttons(index, total, img_key, current, results)
+            return
+
         # Auto-classification suggestion badge — shown when confidence is below
         # the HIGH_CONFIDENCE threshold (those were handled in bulk_review) but
         # still meaningfully non-"content". We show all non-content suggestions here.
@@ -5721,16 +5857,60 @@ def render_manual_review():
 
 
 # -----------------------------------------------------------------------------
+# _convert_docx_to_pdf()
+# Converts DOCX bytes to a fully tagged, accessible PDF by driving Microsoft
+# Word via COM automation (Windows) through the docx2pdf library.
+# This is the correct path for producing an accessible PDF — Word preserves
+# heading structure, image alt text (wp:docPr descr), and reading order in
+# its PDF export in a way that no pure-Python PDF library can replicate.
+# -----------------------------------------------------------------------------
+def _convert_docx_to_pdf(docx_bytes):
+    """
+    Write DOCX bytes to a temp file, call docx2pdf to convert via Word,
+    read the resulting PDF back as bytes, and clean up.
+
+    Parameters:
+        docx_bytes (bytes): The fully built DOCX file.
+
+    Returns:
+        bytes: The converted PDF file.
+
+    Raises:
+        Exception: Propagates any error from docx2pdf so the caller can
+                   show a helpful message rather than crashing silently.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        docx_path = os.path.join(tmpdir, "edited.docx")
+        pdf_path  = os.path.join(tmpdir, "edited.pdf")
+
+        with open(docx_path, "wb") as f:
+            f.write(docx_bytes)
+
+        # docx2pdf drives Word via COM on Windows. Word must be installed.
+        # On Mac/Linux it falls back to LibreOffice if available.
+        docx2pdf_convert(docx_path, pdf_path)
+
+        with open(pdf_path, "rb") as f:
+            return f.read()
+
+
+# -----------------------------------------------------------------------------
 # STEP: choose_format
 # Ask whether the user wants DOCX or PDF output.
 # Per CLAUDE.md: deliver the file with "_edited" appended to the original name.
 # -----------------------------------------------------------------------------
 def render_choose_format():
     """
-    Purpose: Let the user choose their output format (DOCX or PDF).
+    Purpose: Deliver the remediated file to the faculty member.
+
+    Two-step flow:
+      1. Always show the fully remediated DOCX for immediate download.
+      2. Offer to convert that DOCX to a properly tagged, accessible PDF
+         using Microsoft Word via docx2pdf. The PDF carries all heading
+         structure, image alt text, and accessibility fixes through —
+         unlike a raw PDF export from pikepdf, which only has metadata.
+
     Per CLAUDE.md: file name gets "_edited" appended before the extension.
-    Builds the chosen format from the current working copy and serves it
-    as a download via st.download_button.
     """
     st.title("♿ PDF Assistant")
     st.divider()
@@ -5738,60 +5918,90 @@ def render_choose_format():
     resolved = len(st.session_state.resolved_ids)
     st.success(f"Great work — you've resolved {resolved} accessibility issue(s).")
 
-    st.markdown(
-        "What format would you like for your updated file? "
-        "I'll save it with your original file name, with **_edited** added at the end."
-    )
-
-    # Build the output file names for display
     base_name = st.session_state.file_name.replace(".pdf", "").replace(".PDF", "")
     docx_name = f"{base_name}_edited.docx"
-    pdf_name = f"{base_name}_edited.pdf"
+    pdf_name  = f"{base_name}_edited.pdf"
 
-    # Use the working copy (which has all confirmed fixes applied).
-    # Fall back to the original if working_pdf_bytes was never set.
+    # Build the DOCX once and cache it. build_docx_from_pdf() is expensive
+    # (runs Docling over the full document), so we only call it once and
+    # store the bytes in session state for all subsequent reruns.
     output_pdf_bytes = st.session_state.working_pdf_bytes or st.session_state.file_bytes
-
-    # Build the DOCX once and cache it in session state.
-    # build_docx_from_pdf() runs Docling over the entire document — it's expensive.
-    # Streamlit reruns this whole function on every user interaction (e.g. clicking
-    # the PDF download button), so without caching the DOCX would be rebuilt every
-    # time even when the user never asked for it.
     if not st.session_state.edited_docx_bytes:
-        with st.spinner("Building your Word document..."):
+        with st.spinner("Building your remediated Word document..."):
             st.session_state.edited_docx_bytes = build_docx_from_pdf(output_pdf_bytes)
     docx_bytes = st.session_state.edited_docx_bytes
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Word processor document (DOCX)**")
-        st.caption(
-            "Opens in Microsoft Word, Google Docs, or any compatible application. "
-            "Best if you need to edit the content further before re-publishing, or "
-            "if you want to re-export as a properly tagged PDF from Word."
-        )
-        st.download_button(
-            label=f"Download {docx_name}",
-            data=docx_bytes,
-            file_name=docx_name,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            type="primary",
-            use_container_width=True,
-        )
+    # -------------------------------------------------------------------------
+    # STEP 1 — DOCX download (always available)
+    # This is the fully remediated document: proper heading structure, images
+    # embedded with alt text set on the Word alt text field, font fixes, etc.
+    # -------------------------------------------------------------------------
+    st.markdown("### Download your remediated Word document")
+    st.markdown(
+        "Your document has been rebuilt with all accessibility fixes applied — "
+        "correct heading structure, images with alt text, and improved readability. "
+        "This Word file is ready to edit, share, or convert to PDF."
+    )
+    st.download_button(
+        label=f"⬇ Download {docx_name}",
+        data=docx_bytes,
+        file_name=docx_name,
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        type="primary",
+        use_container_width=True,
+        key="download_docx",
+    )
 
-    with col2:
-        st.markdown("**Updated PDF document**")
-        st.caption(
-            "Your PDF with all confirmed fixes applied — metadata, language tag, "
-            "and bookmarks are saved. Ready to share or upload directly."
-        )
+    st.divider()
+
+    # -------------------------------------------------------------------------
+    # STEP 2 — Optional PDF conversion via docx2pdf (Word COM on Windows)
+    # docx2pdf drives Microsoft Word to export the DOCX as a tagged PDF.
+    # Word's PDF export correctly transfers heading styles, image alt text
+    # (from wp:docPr descr), and reading order into the PDF structure tree —
+    # producing a PDF that meets WCAG 2.2 SC 1.1.1 and 1.3.1.
+    # -------------------------------------------------------------------------
+    st.markdown("### Convert to accessible PDF (optional)")
+
+    if st.session_state.edited_pdf_bytes:
+        # Conversion already done — just show the download button.
+        st.success("Your accessible PDF is ready to download.")
         st.download_button(
-            label=f"Download {pdf_name}",
-            data=output_pdf_bytes,
+            label=f"⬇ Download {pdf_name}",
+            data=st.session_state.edited_pdf_bytes,
             file_name=pdf_name,
             mime="application/pdf",
             use_container_width=True,
+            key="download_pdf",
         )
+    else:
+        st.markdown(
+            "We can convert your remediated Word document to a fully accessible PDF "
+            "right now using Microsoft Word on this machine. The PDF will include all "
+            "heading structure, image alt text, and accessibility fixes — ready to "
+            "upload to Blackboard or share with students."
+        )
+        if st.button(
+            "Convert and download as PDF",
+            use_container_width=True,
+            key="convert_to_pdf",
+        ):
+            with st.spinner(
+                "Converting to PDF using Microsoft Word — this may take a moment..."
+            ):
+                try:
+                    st.session_state.edited_pdf_bytes = _convert_docx_to_pdf(docx_bytes)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(
+                        "PDF conversion was not successful. This usually means Microsoft "
+                        "Word is not available on this machine.\n\n"
+                        "**To create the accessible PDF yourself:** open the Word document "
+                        "you downloaded above, then use **File → Save As** (or **Export**) "
+                        "and choose PDF. Word will carry all the accessibility fixes through "
+                        "into the PDF automatically.\n\n"
+                        f"Technical detail: {exc}"
+                    )
 
     _render_abandon_button()
 
