@@ -27,8 +27,8 @@ This is a learning environment for exploring Claude Code and programming languag
 
 When working on accessibility features, always reference:
 
-### WCAG 2.1 AA Guidelines
-- Cite specific success criteria (e.g., WCAG 2.1 SC 1.4.3 for color contrast)
+### WCAG 2.2 AA Guidelines
+- Cite specific success criteria (e.g., WCAG 2.2 SC 1.4.3 for color contrast)
 - Explain how implementations meet the criteria
 - Link requirements to practical code examples
 
@@ -43,7 +43,7 @@ When working on accessibility features, always reference:
 <!--
   Navigation Section
   Purpose: Provides site-wide navigation links
-  Accessibility: Uses <nav> landmark for screen readers (WCAG 2.1 SC 1.3.1)
+  Accessibility: Uses <nav> landmark for screen readers (WCAG 2.2 SC 1.3.1)
   Title II: Ensures equal access to navigation for users with disabilities
 -->
 <nav aria-label="Main navigation">

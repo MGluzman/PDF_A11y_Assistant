@@ -70,7 +70,7 @@ be used where relevant — especially for reading order and list tagging.
 
 ### ~~8. Manual Review Checklist screen~~ ✅ Done 2026-05-11
 Some accessibility issues cannot be detected algorithmically — they require a
-human eye to evaluate. These are real WCAG 2.1 / Title II problems that the app
+human eye to evaluate. These are real WCAG 2.2 / Title II problems that the app
 should surface, even if it can't fix them automatically.
 
 **What to build:** A new workflow screen shown after all auto-detected issues are

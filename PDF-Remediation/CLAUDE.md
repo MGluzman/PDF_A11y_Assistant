@@ -3,7 +3,7 @@
 
 ## About This Tool
 This tool is called **PDF Assistant**. It helps faculty remediate digital course
-content to make it accessible and compliant with WCAG 2.1 Level AA and Title II
+content to make it accessible and compliant with WCAG 2.2 Level AA and Title II
 of the ADA. The tool is built with Streamlit and Python.
 
 ---
@@ -328,7 +328,7 @@ continuing with any other analysis.
 Defined Red Light issues:
 - **Scanned image document** — The entire document (or significant portions) consists
   of images of text with no selectable characters. Screen readers, search, copy/paste,
-  translation, and text resizing all fail completely. (WCAG 2.1 SC 1.4.5; Title II 28 CFR Part 35)
+  translation, and text resizing all fail completely. (WCAG 2.2 SC 1.4.5; Title II 28 CFR Part 35)
 
   When this issue is detected, display an ANALYSIS STOPPED callout. The opening
   line is tailored based on scope:
@@ -361,7 +361,7 @@ Defined Red Light issues:
   2. **No, I'm done for now.** — end the session entirely
 - **Untagged PDF** — The document has no structure tags at all. Screen reader users
   receive no headings, no reading order, no landmarks — the content is effectively
-  inaccessible to them. (WCAG 2.1 SC 1.3.1; Title II 28 CFR Part 35)
+  inaccessible to them. (WCAG 2.2 SC 1.3.1; Title II 28 CFR Part 35)
 
   When the user selects this issue from the issue list, do NOT go directly to the
   fix screen. First ask the Source File Question (see below).
@@ -408,12 +408,12 @@ Defined Red Light issues:
   span count across the document, this issue is raised as Red. Between 1% and 25%
   it is raised as Yellow (Moderate readability barrier, see below).
   Fix path: create a new document with corrected colors, fonts, and sizes applied.
-  (WCAG 2.1 SC 1.4.3, 1.4.6; Title II 28 CFR Part 35)
+  (WCAG 2.2 SC 1.4.3, 1.4.6; Title II 28 CFR Part 35)
 
 - **Images with missing text descriptions** — Every image that does not have a text
   description (alt text) is flagged as Red Light by default. Severity is reassigned
   during remediation based on the faculty member's answers (see Image Remediation
-  Workflow below). (WCAG 2.1 SC 1.1.1; Title II 28 CFR Part 35)
+  Workflow below). (WCAG 2.2 SC 1.1.1; Title II 28 CFR Part 35)
 
 
 ---
@@ -585,7 +585,7 @@ Group images into three sections:
 
 ### 🟡 Yellow Light — Moderate
 Issues that significantly affect users who rely on assistive technology or who
-have difficulty reading certain content. These are required fixes under WCAG 2.1
+have difficulty reading certain content. These are required fixes under WCAG 2.2
 Level AA and Title II of the ADA. Present them as important and worth addressing,
 but in a supportive tone — not as an emergency.
 
@@ -597,7 +597,7 @@ Defined Yellow Light issues:
   to navigate and understand the document's structure. Without correct headings, they
   must listen to the entire document linearly.
   Fix path: identify the correct heading structure from the visual layout and apply
-  proper heading tags in a new document. (WCAG 2.1 SC 1.3.1; Title II 28 CFR Part 35)
+  proper heading tags in a new document. (WCAG 2.2 SC 1.3.1; Title II 28 CFR Part 35)
 
 - **Incorrectly structured or unlabeled tables** — Tables that are missing header
   rows, have merged cells without proper markup, or use layout tables for visual
@@ -605,7 +605,7 @@ Defined Yellow Light issues:
   headers to give each cell meaning. Without them, tabular data becomes a confusing
   sequence of numbers and words.
   Fix path: restructure tables with proper headers and markup in a new document.
-  (WCAG 2.1 SC 1.3.1; Title II 28 CFR Part 35)
+  (WCAG 2.2 SC 1.3.1; Title II 28 CFR Part 35)
 
 - **Reading order does not match visual order** — The order in which a screen reader
   encounters content differs from the order a sighted reader would follow on the page.
@@ -617,14 +617,14 @@ Defined Yellow Light issues:
   column zone). Pages with ≥ 2 such violations are problem pages. Issue triggered when
   ≥ 40% of pages with ≥ 4 text blocks are problem pages (minimum 2 pages checked).
   Fix path: reorder the content flow in a new document to match the intended reading
-  sequence. (WCAG 2.1 SC 1.3.2; Title II 28 CFR Part 35)
+  sequence. (WCAG 2.2 SC 1.3.2; Title II 28 CFR Part 35)
 
 - **Missing document language tag** — The document does not declare what language it
   is written in. Screen readers use this tag to select the correct pronunciation rules,
   speech engine, and character interpretation. Without it, content may be read aloud
   in the wrong language or with incorrect pronunciation.
   Fix path: add the correct language tag to the document metadata.
-  (WCAG 2.1 SC 3.1.1; Title II 28 CFR Part 35)
+  (WCAG 2.2 SC 3.1.1; Title II 28 CFR Part 35)
 
 - **Moderate readability barrier** — Sustained blocks of text that are difficult or
   impossible to read due to color/contrast failure, problematic font choice, or small
@@ -633,7 +633,7 @@ Defined Yellow Light issues:
   Detection: same span size < 9pt count as the severe check; 1%–25% of total spans
   triggers this Yellow issue instead of Red.
   Fix path: create a new document with corrected colors, fonts, and sizes applied.
-  (WCAG 2.1 SC 1.4.3; Title II 28 CFR Part 35)
+  (WCAG 2.2 SC 1.4.3; Title II 28 CFR Part 35)
 
 - **Color used as the only way to convey information** — The document uses color alone
   to signal meaning, categorize content, or indicate importance (e.g., "items in red
@@ -647,7 +647,7 @@ Defined Yellow Light issues:
   No automated fix is available — this issue requires manual review.
   Fix path: add a secondary indicator alongside the color — a label, symbol, pattern,
   or inline text — so the information is not lost when color is unavailable.
-  (WCAG 2.1 SC 1.4.1; Title II 28 CFR Part 35)
+  (WCAG 2.2 SC 1.4.1; Title II 28 CFR Part 35)
 
 ### 🟢 Green Light — Minor
 Issues that don't prevent users from reading or understanding the content but
@@ -662,13 +662,13 @@ Defined Green Light issues:
   opens, and search tools use it for indexing. A missing title is a minor but easily
   fixed gap.
   Fix path: add a descriptive title to the document metadata.
-  (WCAG 2.1 SC 2.4.2; Title II 28 CFR Part 35)
+  (WCAG 2.2 SC 2.4.2; Title II 28 CFR Part 35)
 
 - **Missing bookmarks or navigation** — Long documents (generally more than 9 pages)
   without bookmarks or a navigable table of contents require all users — not just
   screen reader users — to scroll through the entire document to find content.
   Fix path: generate bookmarks based on the document's heading structure.
-  (WCAG 2.1 SC 2.4.5; Title II 28 CFR Part 35)
+  (WCAG 2.2 SC 2.4.5; Title II 28 CFR Part 35)
 
 - **Inconsistent list tagging** — Lists that are formatted visually (using dashes,
   asterisks, or manual indentation) but not tagged as actual lists in the document
@@ -678,7 +678,7 @@ Defined Green Light issues:
   `DocItemLabel.LIST_ITEM` elements Docling found. Issue triggered when visual list
   lines ≥ 8 and Docling's count is less than 50% of the visual count.
   Fix path: convert visually formatted lists to properly tagged list elements.
-  (WCAG 2.1 SC 1.3.1; Title II 28 CFR Part 35)
+  (WCAG 2.2 SC 1.3.1; Title II 28 CFR Part 35)
 
 - **Line spacing too tight** — Body text or other sustained text blocks have
   insufficient line height, making the document harder to read — particularly for
@@ -690,7 +690,7 @@ Defined Green Light issues:
   smaller than 7pt are excluded. Issue triggered when > 40% of qualifying line pairs
   are tight.
   Fix path: apply 1.5× line spacing to body text in the DOCX export.
-  (Readability best practice; WCAG 2.1 SC 1.4.12 for reference)
+  (Readability best practice; WCAG 2.2 SC 1.4.12 for reference)
 
 - **Letter spacing too tight** — Text uses compressed tracking that reduces
   legibility, especially for users with dyslexia. Not a strict WCAG AA requirement
@@ -700,7 +700,7 @@ Defined Green Light issues:
   "condense", "narrow", "compress", or "condens") are excluded. Issue triggered when
   > 45% of qualifying spans are below the threshold.
   Fix path: normalize letter spacing to each font's default tracking in the DOCX export.
-  (Readability best practice; WCAG 2.1 SC 1.4.12 for reference)
+  (Readability best practice; WCAG 2.2 SC 1.4.12 for reference)
 
 - **Excessive use of text colors** — The document uses many different text colors
   in a way that creates visual noise and cognitive distraction without conveying
@@ -765,7 +765,7 @@ in plain language — no jargon. Examples:
 
 ## Standards References
 All issue descriptions and recommendations must cite:
-- **WCAG 2.1 Level AA** — cite the specific Success Criterion (e.g., SC 1.1.1)
+- **WCAG 2.2 Level AA** — cite the specific Success Criterion (e.g., SC 1.1.1)
 - **Title II of the ADA** (28 CFR Part 35) — reference where applicable
 
 ---
@@ -795,7 +795,7 @@ All issue descriptions and recommendations must cite:
 
 ### Accessible Presentation of Severity Categories
 The tool must never rely on color alone to communicate severity — doing so would
-violate the very standard (WCAG 2.1 SC 1.4.1) it is helping faculty address.
+violate the very standard (WCAG 2.2 SC 1.4.1) it is helping faculty address.
 
 - Always refer to categories by name in text: "Red Light," "Yellow Light," or
   "Green Light" — never use a colored symbol as the sole indicator

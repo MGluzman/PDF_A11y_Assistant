@@ -7,7 +7,7 @@
 ## What This Tool Does
 
 The PDF Accessibility Assistant helps faculty members find and fix accessibility
-problems in their course materials. It checks a PDF against WCAG 2.1 Level AA
+problems in their course materials. It checks a PDF against WCAG 2.2 Level AA
 and Title II ADA requirements, guides the faculty member through each issue in
 plain language, and delivers a remediated file ready to share with students.
 
@@ -100,5 +100,5 @@ prompt faculty to check these manually:
 
 ## Standards Referenced
 
-- **WCAG 2.1 Level AA** — Web Content Accessibility Guidelines
+- **WCAG 2.2 Level AA** — Web Content Accessibility Guidelines
 - **Title II of the ADA** — 28 CFR Part 35 (applies to state and local government entities, including public universities)

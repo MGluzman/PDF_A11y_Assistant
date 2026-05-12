@@ -2,7 +2,7 @@
 
 ## What You Are Building
 A Streamlit web application that helps faculty audit and fix PDF course materials
-to comply with **WCAG 2.1 Level AA** and **Title II of the ADA**.
+to comply with **WCAG 2.2 Level AA** and **Title II of the ADA**.
 
 ---
 
@@ -91,7 +91,7 @@ Your browser will automatically open to: **http://localhost:8501**
 
 ## Accessibility Standards Reference
 
-### WCAG 2.1 Level AA
+### WCAG 2.2 Level AA
 Web Content Accessibility Guidelines version 2.1, conformance level AA.
 This is the standard referenced in the DOJ's Title II regulations.
 Key criteria for PDFs:
@@ -104,7 +104,7 @@ Key criteria for PDFs:
 
 ### Title II of the ADA (28 CFR Part 35)
 The DOJ updated Title II regulations in 2024 to require:
-- State and local government entities must meet WCAG 2.1 AA for digital content
+- State and local government entities must meet WCAG 2.2 AA for digital content
 - Large entities (population ≥ 50,000): compliance by **April 24, 2026**
 - Small entities: compliance by **April 26, 2027**
 - Course content posted on websites or apps is covered

@@ -4,7 +4,7 @@
 # Purpose:
 #   A step-by-step conversational tool that helps faculty identify and fix
 #   accessibility barriers in PDF course materials to comply with:
-#     - WCAG 2.1 Level AA (Web Content Accessibility Guidelines)
+#     - WCAG 2.2 Level AA (Web Content Accessibility Guidelines)
 #     - Title II of the Americans with Disabilities Act (ADA)
 #       as amended by DOJ regulations effective June 2024
 #
@@ -84,7 +84,7 @@ st.set_page_config(
 #   severity    — "red", "yellow", or "green" (drives display and ordering)
 #   title       — short label shown in the issue list
 #   description — explanation of why this matters for students
-#   wcag        — WCAG 2.1 Success Criterion reference
+#   wcag        — WCAG 2.2 Success Criterion reference
 #   ada         — Title II / 28 CFR Part 35 reference
 #   fix_preview — sample text shown during the QA confirmation step
 # =============================================================================
@@ -98,7 +98,7 @@ DEMO_ISSUES = [
             "alt text). Students who use screen readers — software that reads content aloud "
             "— won't be able to access the information those images convey."
         ),
-        "wcag": "WCAG 2.1 SC 1.1.1 — Non-text Content",
+        "wcag": "WCAG 2.2 SC 1.1.1 — Non-text Content",
         "ada": "Title II ADA, 28 CFR Part 35",
         "fix_preview": (
             "I've reviewed each image in your document and generated a text description "
@@ -116,7 +116,7 @@ DEMO_ISSUES = [
             "and what order to read things in. Without them, a screen reader user hears "
             "the content as an undifferentiated stream of text — or nothing at all."
         ),
-        "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+        "wcag": "WCAG 2.2 SC 1.3.1 — Info and Relationships",
         "ada": "Title II ADA, 28 CFR Part 35",
         "fix_preview": (
             "I've analyzed the visual layout of your document and generated a tag "
@@ -134,7 +134,7 @@ DEMO_ISSUES = [
             "the visual layout. Screen reader users navigate long documents by jumping "
             "between headings, so an incorrect hierarchy makes it hard to find content."
         ),
-        "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+        "wcag": "WCAG 2.2 SC 1.3.1 — Info and Relationships",
         "ada": "Title II ADA, 28 CFR Part 35",
         "fix_preview": (
             "I've mapped your document's visual layout to a correct heading hierarchy "
@@ -152,7 +152,7 @@ DEMO_ISSUES = [
             "engine. Without it, text may be read aloud in the wrong language or with "
             "incorrect pronunciation — especially for technical terms and proper names."
         ),
-        "wcag": "WCAG 2.1 SC 3.1.1 — Language of Page",
+        "wcag": "WCAG 2.2 SC 3.1.1 — Language of Page",
         "ada": "Title II ADA, 28 CFR Part 35",
         "fix_preview": (
             "I've detected that this document is written in English and will add the "
@@ -169,7 +169,7 @@ DEMO_ISSUES = [
             "tools use it for indexing. A descriptive title helps all users understand "
             "what they're looking at before they start reading."
         ),
-        "wcag": "WCAG 2.1 SC 2.4.2 — Page Titled",
+        "wcag": "WCAG 2.2 SC 2.4.2 — Page Titled",
         "ada": "Title II ADA, 28 CFR Part 35",
         "fix_preview": (
             "I'll add a descriptive title to the document metadata based on the content "
@@ -186,7 +186,7 @@ DEMO_ISSUES = [
             "Without bookmarks, everyone (not just screen reader users) has to scroll "
             "through the entire document to find what they need."
         ),
-        "wcag": "WCAG 2.1 SC 2.4.5 — Multiple Ways",
+        "wcag": "WCAG 2.2 SC 2.4.5 — Multiple Ways",
         "ada": "Title II ADA, 28 CFR Part 35",
         "fix_preview": (
             "I've generated a bookmark list based on the heading structure in your "
@@ -197,7 +197,7 @@ DEMO_ISSUES = [
 
 # Labels and colors for each severity tier.
 # We always pair the emoji icon with a text label (never icon alone).
-# This is required by WCAG 2.1 SC 1.4.1 — Color Not Used as Only Visual Means.
+# This is required by WCAG 2.2 SC 1.4.1 — Color Not Used as Only Visual Means.
 SEVERITY_LABELS = {
     "red":    "🔴 Red Light",
     "yellow": "🟡 Yellow Light",
@@ -358,25 +358,49 @@ def preflight_check(tesseract_path=None, api_endpoints=None, output_paths=None):
     # PermissionError if another process holds an exclusive write lock.
     # On all platforms it raises OSError if the directory doesn't exist
     # or the file system is read-only.
+    #
+    # Special case: callers may pass a directory (e.g. tempfile.gettempdir())
+    # to confirm the temp folder is writable. On Windows, open() on a directory
+    # path always raises PermissionError regardless of actual permissions, so we
+    # probe directories by creating and immediately deleting a small file inside.
     # ------------------------------------------------------------------
     if output_paths:
         for path in output_paths:
-            try:
-                # Open in append-binary mode so we don't truncate any
-                # existing content — we only need to confirm write access.
-                with open(path, "a+b"):
-                    pass
-            except PermissionError:
-                errors.append(
-                    f"Output path is locked by another process or the app "
-                    f"does not have write permission: `{path}`\n"
-                    f"Close any applications that may have this file open and try again."
-                )
-            except OSError as exc:
-                errors.append(
-                    f"Output path is not writable: `{path}`\n"
-                    f"OS error: {exc}"
-                )
+            if os.path.isdir(path):
+                # Probe a directory by writing a temporary file inside it.
+                probe = os.path.join(path, ".preflight_write_probe")
+                try:
+                    with open(probe, "a+b"):
+                        pass
+                    os.remove(probe)
+                except PermissionError:
+                    errors.append(
+                        f"Output path is locked by another process or the app "
+                        f"does not have write permission: `{path}`\n"
+                        f"Close any applications that may have this file open and try again."
+                    )
+                except OSError as exc:
+                    errors.append(
+                        f"Output path is not writable: `{path}`\n"
+                        f"OS error: {exc}"
+                    )
+            else:
+                try:
+                    # Open in append-binary mode so we don't truncate any
+                    # existing content — we only need to confirm write access.
+                    with open(path, "a+b"):
+                        pass
+                except PermissionError:
+                    errors.append(
+                        f"Output path is locked by another process or the app "
+                        f"does not have write permission: `{path}`\n"
+                        f"Close any applications that may have this file open and try again."
+                    )
+                except OSError as exc:
+                    errors.append(
+                        f"Output path is not writable: `{path}`\n"
+                        f"OS error: {exc}"
+                    )
 
     return {"ok": len(errors) == 0, "errors": errors}
 
@@ -1459,7 +1483,7 @@ def apply_fix_missing_lang(working_bytes, fix_data):
 
     /Lang is the standard PDF mechanism for declaring the document language.
     Screen readers use it to select the correct speech engine and pronunciation
-    rules. (WCAG 2.1 SC 3.1.1)
+    rules. (WCAG 2.2 SC 3.1.1)
 
     Parameters:
         working_bytes (bytes): Current working copy of the PDF.
@@ -1485,7 +1509,7 @@ def apply_fix_bookmarks(working_bytes, fix_data):
     to detect heading structure.
 
     Uses PyMuPDF's set_toc() which writes a proper PDF /Outline tree that PDF
-    readers and assistive technology can navigate. (WCAG 2.1 SC 2.4.5)
+    readers and assistive technology can navigate. (WCAG 2.2 SC 2.4.5)
 
     Parameters:
         working_bytes (bytes): Current working copy of the PDF.
@@ -1766,7 +1790,7 @@ def analyze_pdf(file_bytes):
                     "tools use it for indexing. A descriptive title helps all users understand "
                     "what they're looking at before they start reading."
                 ),
-                "wcag": "WCAG 2.1 SC 2.4.2 — Page Titled",
+                "wcag": "WCAG 2.2 SC 2.4.2 — Page Titled",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": fix_preview,
                 "fix_data": {"title_candidate": title_candidate},
@@ -1802,7 +1826,7 @@ def analyze_pdf(file_bytes):
                     "engine. Without it, text may be read aloud in the wrong language or with "
                     "incorrect pronunciation — especially for technical terms and proper names."
                 ),
-                "wcag": "WCAG 2.1 SC 3.1.1 — Language of Page",
+                "wcag": "WCAG 2.2 SC 3.1.1 — Language of Page",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     f"I've detected that this document is written in "
@@ -1826,7 +1850,7 @@ def analyze_pdf(file_bytes):
                     "Without bookmarks, everyone — not just screen reader users — has to "
                     "scroll through the entire document to find what they need."
                 ),
-                "wcag": "WCAG 2.1 SC 2.4.5 — Multiple Ways",
+                "wcag": "WCAG 2.2 SC 2.4.5 — Multiple Ways",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     "I'll generate bookmarks based on the heading structure I detect in your "
@@ -1857,7 +1881,7 @@ def analyze_pdf(file_bytes):
                     "and what order to read things in. Without them, a screen reader user hears "
                     "the content as an undifferentiated stream of text — or nothing at all."
                 ),
-                "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+                "wcag": "WCAG 2.2 SC 1.3.1 — Info and Relationships",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     "I'll convert this document to a structured Word document (DOCX) that "
@@ -1889,7 +1913,7 @@ def analyze_pdf(file_bytes):
                         "between headings — without them, they must listen to the entire "
                         "document from start to finish to find what they need."
                     ),
-                    "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+                    "wcag": "WCAG 2.2 SC 1.3.1 — Info and Relationships",
                     "ada": "Title II ADA, 28 CFR Part 35",
                     "fix_preview": (
                         "The Word document output will use your document's visual layout "
@@ -1912,7 +1936,7 @@ def analyze_pdf(file_bytes):
                         "between sections. A broken hierarchy makes that navigation "
                         "confusing or misleading."
                     ),
-                    "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+                    "wcag": "WCAG 2.2 SC 1.3.1 — Info and Relationships",
                     "ada": "Title II ADA, 28 CFR Part 35",
                     "fix_preview": (
                         "Here is the heading structure detected in your document. "
@@ -2001,7 +2025,7 @@ def analyze_pdf(file_bytes):
                     "readers — software that reads content aloud — won't be able to access "
                     "the information those images convey."
                 ),
-                "wcag": "WCAG 2.1 SC 1.1.1 — Non-text Content",
+                "wcag": "WCAG 2.2 SC 1.1.1 — Non-text Content",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     f"I found {count} image{'s' if count != 1 else ''} in your document. "
@@ -2064,7 +2088,7 @@ def analyze_pdf(file_bytes):
                 "severity":    rb_severity,
                 "title":       rb_title,
                 "description": rb_desc,
-                "wcag":        "WCAG 2.1 SC 1.4.3, 1.4.6 — Contrast (Minimum/Enhanced)",
+                "wcag":        "WCAG 2.2 SC 1.4.3, 1.4.6 — Contrast (Minimum/Enhanced)",
                 "ada":         "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     "When you download your file as a Word document, I'll apply a "
@@ -2180,7 +2204,7 @@ def analyze_pdf(file_bytes):
                     "in the file — if that order is scrambled, users hear content out of "
                     "sequence, making the document confusing or unintelligible."
                 ),
-                "wcag": "WCAG 2.1 SC 1.3.2 — Meaningful Sequence",
+                "wcag": "WCAG 2.2 SC 1.3.2 — Meaningful Sequence",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     "When you download your file as a Word document, the content will be "
@@ -2202,23 +2226,16 @@ def analyze_pdf(file_bytes):
             issues.append({
                 "id": "color_only_cue",
                 "severity": "yellow",
-                "title": "Color may be used as the only way to convey information",
+                "title": "Colored text detected — manual accessibility check needed",
                 "description": (
-                    f"This document uses {len(meaningful_colors)} distinct text colors "
-                    "across significant portions of the content. If color is the only "
-                    "thing distinguishing categories, priorities, required items, or "
-                    "other meaningful differences — with no accompanying label, symbol, "
-                    "or text — students who are color-blind or printing in black and "
-                    "white will miss that meaning entirely."
+                    f"This document uses {len(meaningful_colors)} distinct text colors. "
+                    "Color can create accessibility barriers in several ways — most of "
+                    "which can't be verified or fixed automatically. A quick manual "
+                    "review is needed to confirm your students won't miss anything."
                 ),
-                "wcag": "WCAG 2.1 SC 1.4.1 — Use of Color",
+                "wcag": "WCAG 2.2 SC 1.4.1 — Use of Color",
                 "ada": "Title II ADA, 28 CFR Part 35",
-                "fix_preview": (
-                    "This issue requires a quick manual check — I can't determine what "
-                    "the colors mean just from the file. Look through your document and "
-                    "confirm that anything communicated by color also has a text label, "
-                    "symbol, or other non-color indicator alongside it."
-                ),
+                "fix_preview": "",
                 "fix_data": {"color_count": len(meaningful_colors)},
             })
 
@@ -2245,7 +2262,7 @@ def analyze_pdf(file_bytes):
                     "between items. Without that tagging, list content reads as a "
                     "stream of plain text with no navigation or context cues."
                 ),
-                "wcag": "WCAG 2.1 SC 1.3.1 — Info and Relationships",
+                "wcag": "WCAG 2.2 SC 1.3.1 — Info and Relationships",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     "When you download your file as a Word document, visually formatted "
@@ -2273,7 +2290,7 @@ def analyze_pdf(file_bytes):
                     "low vision, or attention difficulties. WCAG recommends body text "
                     "line spacing of at least 1.5× the font size."
                 ),
-                "wcag": "WCAG 2.1 SC 1.4.12 — Text Spacing",
+                "wcag": "WCAG 2.2 SC 1.4.12 — Text Spacing",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     "When you download your file as a Word document, I'll apply 1.5× "
@@ -2297,7 +2314,7 @@ def analyze_pdf(file_bytes):
                     "students with dyslexia, who rely on distinct spacing between "
                     "letters to distinguish similar characters (b/d, p/q, n/m)."
                 ),
-                "wcag": "WCAG 2.1 SC 1.4.12 — Text Spacing",
+                "wcag": "WCAG 2.2 SC 1.4.12 — Text Spacing",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     "When you download your file as a Word document, letter spacing "
@@ -2320,7 +2337,7 @@ def analyze_pdf(file_bytes):
                     "it harder to focus on the material. It can also confuse readers "
                     "about which color differences carry meaning and which are decorative."
                 ),
-                "wcag": "WCAG 2.1 SC 1.4.1 — Use of Color",
+                "wcag": "WCAG 2.2 SC 1.4.1 — Use of Color",
                 "ada": "Title II ADA, 28 CFR Part 35",
                 "fix_preview": (
                     "When you download your file as a Word document, text colors will "
@@ -2464,7 +2481,7 @@ def build_docx_from_pdf(pdf_bytes):
                 elif label == DocItemLabel.LIST_ITEM:
                     # List items — map to Word's built-in List Bullet style
                     # so they render as a proper bulleted list, not plain text.
-                    # WCAG 2.1 SC 1.3.1: structure must be programmatically determinable.
+                    # WCAG 2.2 SC 1.3.1: structure must be programmatically determinable.
                     if text:
                         doc_out.add_paragraph(text, style="List Bullet")
 
@@ -2496,7 +2513,7 @@ def build_docx_from_pdf(pdf_bytes):
                         # Write the description as the alt text for this image.
                         # Format: "[Image, page N: <approved description>]"
                         # This makes the description visible and searchable in Word,
-                        # satisfying WCAG 2.1 SC 1.1.1 for documents that will be
+                        # satisfying WCAG 2.2 SC 1.1.1 for documents that will be
                         # re-exported to PDF.
                         doc_out.add_paragraph(
                             f"[Image, page {page_num}: {approved_text}]"
@@ -2726,7 +2743,7 @@ with st.sidebar:
     st.divider()
 
     # Severity system explainer — shown once in the sidebar as reference.
-    # Per WCAG 2.1 SC 1.4.1, we always pair the color indicator with text.
+    # Per WCAG 2.2 SC 1.4.1, we always pair the color indicator with text.
     st.markdown(
         """
         **About issue severity**
@@ -3020,7 +3037,7 @@ def render_scanned_doc():
     Either way, analysis is stopped and OCR is required before proceeding.
 
     Accessibility note: the "ANALYSIS STOPPED" label uses text, not color alone,
-    to communicate the severity — per WCAG 2.1 SC 1.4.1.
+    to communicate the severity — per WCAG 2.2 SC 1.4.1.
     """
     st.title("♿ PDF Assistant")
     st.divider()
@@ -3049,7 +3066,7 @@ def render_scanned_doc():
 
     # Standards reference — supporting context, not the lead reason to act
     st.caption(
-        "WCAG 2.1 SC 1.4.5 — Images of Text | Title II ADA, 28 CFR Part 35"
+        "WCAG 2.2 SC 1.4.5 — Images of Text | Title II ADA, 28 CFR Part 35"
     )
 
     # Scan quality disclaimer — sets expectations without blocking the workflow.
@@ -4955,19 +4972,6 @@ def render_resolving_issue():
             )
             _docx_path_buttons()
 
-        # --- color_only_cue: manual review required, no algorithmic fix ---
-        elif issue["id"] == "color_only_cue":
-            st.info(
-                "This is a manual check — there's no automated fix I can apply for "
-                "this one. Go through your document and look for places where color "
-                "alone carries meaning: required fields marked only in red, categories "
-                "coded only by text color, warnings with no symbol or label.\n\n"
-                "For each color-coded element, add a text label, an asterisk, a "
-                "symbol, or any other non-color indicator alongside it. Once you've "
-                "reviewed the document, you can acknowledge this issue and continue."
-            )
-            _docx_path_buttons("I've reviewed it — looks fine")
-
         # --- inconsistent_list_tagging: explain DOCX conversion improves list structure ---
         elif issue["id"] == "inconsistent_list_tagging":
             st.info(
@@ -5067,6 +5071,192 @@ def render_resolving_issue():
         if issue_type == "skip" and heading_levels:
             st.markdown("**Detected heading sequence** (problems marked in bold):")
             st.markdown(_describe_heading_sequence(heading_levels))
+
+    elif issue["id"] == "untagged_pdf":
+        # Nothing has been changed yet — this fix is applied at export time
+        # when the document is converted to DOCX. Show both the plan and the
+        # reason why, so the faculty member can make an informed decision.
+        # Second button skips this issue and returns to the issue list.
+        st.markdown("**Here's the plan — does this work for you?**")
+        st.info(
+            "**What we'll do:** I'll convert this document to a structured Word "
+            "document (.docx) that preserves your headings, paragraphs, and reading "
+            "order. You can then re-save it as a properly tagged PDF from Word or "
+            "Google Docs.\n\n"
+            "**Why a Word document?** This PDF has no accessibility tags, and adding "
+            "them directly requires specialized tools like Adobe Acrobat Pro. Converting "
+            "to Word gives your content real heading styles, list formatting, and a "
+            "correct reading order built in from the start — and re-saving from Word "
+            "produces a properly tagged, accessible PDF."
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                "Yes, let's do it.",
+                type="primary",
+                use_container_width=True,
+                key="confirm_yes",
+            ):
+                _apply_and_advance()
+        with col2:
+            if st.button(
+                "No, not now.",
+                use_container_width=True,
+                key="confirm_no",
+            ):
+                _skip_issue()
+
+        _render_abandon_button()
+        return
+
+    elif issue["id"] == "missing_lang":
+        # The fix writes a /Lang tag to the PDF metadata — nothing has changed yet.
+        # Show what will be added, why it matters, and let the faculty member
+        # correct the auto-detected language if needed, all on one screen.
+        lang_code = issue.get("fix_data", {}).get("lang_code", "en-US")
+        lang_options = {
+            "English (United States)": "en-US",
+            "English (United Kingdom)": "en-GB",
+            "Spanish":                 "es-ES",
+            "French":                  "fr-FR",
+            "German":                  "de-DE",
+            "Portuguese":              "pt-PT",
+            "Italian":                 "it-IT",
+            "Chinese (Simplified)":    "zh-CN",
+            "Chinese (Traditional)":   "zh-TW",
+            "Japanese":                "ja",
+            "Korean":                  "ko",
+            "Arabic":                  "ar",
+            "Russian":                 "ru",
+            "Hindi":                   "hi",
+            "Dutch":                   "nl-NL",
+            "Polish":                  "pl",
+            "Turkish":                 "tr",
+        }
+        current_display = next(
+            (k for k, v in lang_options.items() if v == lang_code),
+            "English (United States)",
+        )
+
+        st.markdown("**Here's the plan — does this work for you?**")
+        st.info(
+            f"**What we'll do:** Add the language tag **{_lang_display_name(lang_code)}** "
+            f"(`{lang_code}`) to your document's metadata.\n\n"
+            "**Why it matters:** Screen readers use the language tag to choose the right "
+            "pronunciation rules and speech engine. Without it, text may be read aloud "
+            "in the wrong accent or with incorrect pronunciation — especially noticeable "
+            "for technical terms, proper names, and any non-English content."
+        )
+
+        st.markdown(
+            f"I detected **{_lang_display_name(lang_code)}** based on your document's content. "
+            "If that's not right, choose the correct language below before confirming:"
+        )
+        selected_name = st.selectbox(
+            "Document language:",
+            options=list(lang_options.keys()),
+            index=list(lang_options.keys()).index(current_display),
+            key="lang_select_standard",
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                "Yes, let's do it.",
+                type="primary",
+                use_container_width=True,
+                key="confirm_yes",
+            ):
+                issue["fix_data"]["lang_code"] = lang_options[selected_name]
+                _apply_and_advance()
+        with col2:
+            if st.button(
+                "No, not now.",
+                use_container_width=True,
+                key="confirm_no",
+            ):
+                _skip_issue()
+
+        _render_abandon_button()
+        return
+
+    elif issue["id"] == "color_only_cue":
+        # We detected colored text but can't verify or fix the accessibility
+        # implications automatically. Explain what to look for, offer a DOCX
+        # download so the faculty member can fix the colors in Word themselves,
+        # then let them acknowledge or skip.
+        color_count = issue.get("fix_data", {}).get("color_count", 0)
+        file_stem = (st.session_state.file_name or "document").rsplit(".", 1)[0]
+
+        st.markdown("**We noticed colored text in your document.**")
+        st.markdown(
+            f"This document uses **{color_count} distinct text colors**. "
+            "Color can create accessibility barriers in a few ways — most of which "
+            "require a quick manual check rather than an automated fix. "
+            "Here's what to look for:"
+        )
+        st.markdown(
+            "**1. Color as the only cue for meaning** (WCAG 2.2 SC 1.4.1)  \n"
+            "If color is the only thing distinguishing categories, required items, "
+            "or warnings — with no label, symbol, or text alongside it — students "
+            "who are color-blind or printing in black and white will miss that "
+            "meaning entirely.  \n"
+            "*Fix:* Add a text label, asterisk, or symbol next to anything communicated "
+            "by color alone. For example: \"Required \\*\" instead of red text alone.\n\n"
+            "**2. Text contrast** (WCAG 2.2 SC 1.4.3)  \n"
+            "Colored text may not meet the minimum contrast ratio against the page "
+            "background — especially light colors on white.  \n"
+            "*Fix:* Check that colored text meets at least 4.5:1 contrast for body "
+            "text, or 3:1 for large text (18pt+). Tools like the WebAIM Contrast "
+            "Checker can help."
+        )
+
+        st.divider()
+        st.markdown(
+            "**To make these fixes yourself:** Download your document as a Word file, "
+            "open it in Microsoft Word or Google Docs, and make the color adjustments "
+            "there. The Word file already has your headings, paragraphs, and structure "
+            "preserved — it's ready to edit."
+        )
+
+        # Build or reuse the cached DOCX so the download is ready immediately.
+        if not st.session_state.get("edited_docx_bytes"):
+            with st.spinner("Preparing your Word document..."):
+                pdf_bytes = st.session_state.working_pdf_bytes or st.session_state.file_bytes
+                st.session_state.edited_docx_bytes = build_docx_from_pdf(pdf_bytes)
+        docx_bytes = st.session_state.edited_docx_bytes
+
+        if docx_bytes:
+            st.download_button(
+                label="⬇ Download as Word document (.docx)",
+                data=docx_bytes,
+                file_name=f"{file_stem}_edited.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key="color_docx_download",
+            )
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                "I've handled it — move on.",
+                type="primary",
+                use_container_width=True,
+                key="confirm_yes",
+            ):
+                _apply_and_advance()
+        with col2:
+            if st.button(
+                "No, not now.",
+                use_container_width=True,
+                key="confirm_no",
+            ):
+                _skip_issue()
+
+        _render_abandon_button()
+        return
 
     else:
         st.markdown("**Here's what I changed. Does this look right to you?**")
@@ -5235,7 +5425,7 @@ def render_re_analysis():
 def render_manual_review():
     """
     Purpose: Surface accessibility issues that require human judgment.
-    These are real WCAG 2.1 / Title II problems the app cannot detect
+    These are real WCAG 2.2 / Title II problems the app cannot detect
     algorithmically. Faculty review each item and mark it OK or needing attention.
     """
     # Checklist items — defined here since they are only used by this function.
@@ -5574,6 +5764,6 @@ handler()
 st.divider()
 st.caption(
     "PDF Assistant supports compliance with **Title II of the ADA** (28 CFR Part 35) "
-    "and **WCAG 2.1 Level AA**. It provides guidance and analysis but does not "
+    "and **WCAG 2.2 Level AA**. It provides guidance and analysis but does not "
     "constitute legal advice. Always consult your institution's accessibility office."
 )
