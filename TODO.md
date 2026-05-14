@@ -1,6 +1,6 @@
 # To Do Next — Agentic AI Accessibility Suite
 
-**Last updated:** 2026-05-11 (session 2)
+**Last updated:** 2026-05-14 (session 3)
 
 ---
 
@@ -102,6 +102,27 @@ Presents a structured checklist of manually-verifiable items with:
 ---
 
 ### ~~7. Stale "Phase 1" comments in app.py~~ ✅ Done 2026-04-16
+
+---
+
+### 9. Restyle issue panel boxes in global CSS
+
+The "Why this matters" and "Here's the plan" boxes in `render_resolving_issue()`
+now use CSS classes `.issue-why-box` and `.issue-plan-box` (defined in the global
+`st.markdown(<style>...)` block near the bottom of `app.py`).
+
+**To restyle:** edit those two classes — background, border color/width, padding,
+border-radius, font — in one place and all issue screens update automatically.
+
+Current defaults:
+- `.issue-why-box` — white background, 1px mid-gray (`#999799`) border
+- `.issue-plan-box` — white background, 1px BC maroon (`#882346`) border
+- `.issue-box-label` — small-caps label above each box content
+
+Branches that use `render_plan_box()` (styled): `untagged_pdf`, `heading_hierarchy`,
+default `else`. Branches with interactive widgets (`missing_lang`, `color_only_cue`,
+`missing_title`) still use `st.info()` / `st.markdown()` — consider migrating those
+too once the layout is finalized.
 
 ---
 

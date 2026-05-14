@@ -2802,19 +2802,6 @@ init_state()
 # =============================================================================
 
 with st.sidebar:
-    st.header("⚙️ Settings")
-
-    # Tesseract OCR path — pytesseract needs to know where the binary lives.
-    # This path will be read by the OCR step in Phase 2.
-    st.text_input(
-        label="Tesseract OCR Path",
-        value=r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        help="Path to tesseract.exe. Download from: https://github.com/UB-Mannheim/tesseract/wiki",
-        key="tesseract_path",
-    )
-
-    st.divider()
-
     # "Start Over" button — only show it when the user is past the upload step.
     # Clicking it resets all session state and returns to the upload screen.
     if st.session_state.step != "upload":
@@ -2847,17 +2834,27 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown(
-        """
-        **About this tool**
-
-        Built to support faculty in making digital course content accessible
-        under **Title II of the ADA** (28 CFR Part 35), effective
-        April 24, 2026 for large public institutions.
-
-        Version 0.3 — Phase 2
-        """
+    # Compliance Updates — timely regulatory notices for faculty reference.
+    st.markdown("**Compliance Updates**")
+    st.info(
+        "**NYS deadline:** CUNY must meet WCAG 2.2 Level AA by "
+        "**January 1, 2027** under Title II of the ADA (28 CFR Part 35).",
+        icon="📅",
     )
+
+    # Advanced settings — hidden by default, not relevant for most faculty users.
+    st.divider()
+    with st.expander("⚙️ Advanced", expanded=False):
+        st.caption(
+            "Only change this if Tesseract OCR is installed in a non-default location."
+        )
+        st.text_input(
+            label="Tesseract path",
+            value=r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            help="Path to tesseract.exe. Download from: https://github.com/UB-Mannheim/tesseract/wiki",
+            key="tesseract_path",
+            label_visibility="collapsed",
+        )
 
 
 # =============================================================================
@@ -2870,6 +2867,80 @@ with st.sidebar:
 #   st.session_state.step = "next_step_name"
 #   st.rerun()   ← tells Streamlit to re-run the script from the top
 # =============================================================================
+
+
+def render_page_header():
+    """
+    Shared branding header shown at the top of every non-landing screen.
+    Layout: [BC logo] | [2px gray vertical rule] | PDF Accessibility Assistant
+    Rendered as a single HTML flexbox block so the vertical rule always matches
+    the logo height exactly — no fixed pixel guessing.
+    Logo uses max-width: 120px with width: 10% so it scales on narrow screens.
+    Constrained to the same 6/1 column grid used by all content screens.
+    The app name is styled text, NOT H1 — each screen provides its own H1.
+    """
+    import os, base64
+    BC_GRAY  = "#999799"
+    BC_MAROON = "#882346"
+    logo_path = os.path.join(os.path.dirname(__file__), "..", "BC_Logo_Library & Academic IT.png")
+
+    # Base64-encode the logo so it can be embedded directly in the HTML block.
+    # This lets CSS flexbox control sizing and alignment rather than Streamlit columns.
+    logo_html = ""
+    if os.path.exists(logo_path):
+        with open(logo_path, "rb") as f:
+            logo_b64 = base64.b64encode(f.read()).decode()
+        logo_html = (
+            f"<img src='data:image/png;base64,{logo_b64}' "
+            "style='width:120px; height:auto; display:block;' "
+            "alt='Brooklyn College logo'>"
+        )
+
+    st.markdown(
+        f"""
+        <div style='display:flex; align-items:stretch; gap:14px; margin-bottom:8px;'>
+            {logo_html}
+            <div style='width:1px; background-color:#999799; flex-shrink:0;'></div>
+            <div style='display:flex; align-items:center;'>
+                <p style='color:#999799; font-size:1.15rem; font-weight:700;
+                           margin:0; line-height:1.2;'>
+                    PDF Accessibility Assistant
+                </p>
+            </div>
+        </div>
+        <hr style='border:none; border-top:1px solid {BC_GRAY}; margin:0 0 16px 0;'>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_page_title(title):
+    """
+    Renders the H1 page title alongside a compact refresh warning callout.
+    Layout within the 6/1 grid: [4] title | [2] warning box.
+    Replaces bare st.title() calls on every non-landing screen.
+    """
+    col_title, col_warn = st.columns([4, 2])
+    with col_title:
+        st.title(title)
+    with col_warn:
+        st.markdown(
+            """
+            <div style='
+                background: #FFF8E1;
+                border-left: 3px solid #F3BD48;
+                border-radius: 4px;
+                padding: 8px 10px;
+                font-size: 0.75rem;
+                line-height: 1.4;
+                margin-top: 6px;
+            '>
+            ⚠️ <strong>Do not refresh this page.</strong>
+            Refreshing will restart the session and you will lose your progress.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -2885,8 +2956,8 @@ def render_step_card(number, title, description):
     st.markdown(
         f"""
         <div style='
-            background-color: #F2F2F2;
-            border-left: 4px solid #F0AB00;
+            background-color: #F0F2F6;
+            border-left: 4px solid #F3BD48;
             border-radius: 6px;
             padding: 16px 20px 20px 20px;
             height: 100%;
@@ -2899,7 +2970,7 @@ def render_step_card(number, title, description):
             '>
                 <div style='
                     flex-shrink: 0;
-                    background-color: #862334;
+                    background-color: #882346;
                     color: white;
                     font-weight: 700;
                     font-size: 1rem;
@@ -2910,7 +2981,7 @@ def render_step_card(number, title, description):
                     text-align: center;
                 '>{number}</div>
                 <p style='
-                    color: #862334;
+                    color: #882346;
                     font-weight: 600;
                     font-size: 1rem;
                     margin: 0;
@@ -2937,12 +3008,24 @@ def render_upload():
     # Streamlit's config.toml controls the global theme; these let us
     # apply maroon and gold to specific markdown elements where needed.
     # ------------------------------------------------------------------
-    BC_MAROON = "#862334"
-    BC_GOLD   = "#F0AB00"
-    BC_GRAY   = "#58595B"
+    BC_MAROON = "#882346"
+    BC_GOLD   = "#F3BD48"
+    BC_GRAY   = "#999799"
 
-    import os
-    logo_path = os.path.join(os.path.dirname(__file__), "BC-logo.png")
+    import os, base64
+    logo_path = os.path.join(os.path.dirname(__file__), "..", "BC_Logo_Library & Academic IT.png")
+
+    # Base64-encode logo for embedding in HTML so we can control
+    # width, vertical alignment, and margins precisely.
+    logo_html = ""
+    if os.path.exists(logo_path):
+        with open(logo_path, "rb") as f:
+            logo_b64 = base64.b64encode(f.read()).decode()
+        logo_html = (
+            f"<img src='data:image/png;base64,{logo_b64}' "
+            "style='width:150px; height:auto; vertical-align:middle; margin:10px;' "
+            "alt='Brooklyn College logo'>"
+        )
 
     # ------------------------------------------------------------------
     # All content sits in the left 6/7 of the screen; the rightmost 1/7
@@ -2951,19 +3034,32 @@ def render_upload():
     col_main, col_blank = st.columns([6, 1])
     with col_main:
 
-        # Header — logo inline with tool name
-        col_logo, col_title = st.columns([1, 6])
-        with col_logo:
-            if os.path.exists(logo_path):
-                st.image(logo_path, width=120)
-        with col_title:
-            st.markdown(
-                f"<h2 style='color:{BC_MAROON}; margin:0; padding-top:6px; line-height:1.2;'>"
-                "PDF Accessibility Assistant</h2>"
-                f"<p style='color:{BC_GRAY}; margin:2px 0 0 0; font-size:0.85rem;'>"
-                "Brooklyn College Academic IT &nbsp;|&nbsp; City University of New York</p>",
-                unsafe_allow_html=True,
-            )
+        # Header — full-width single HTML block, no inner column split.
+        # Logo + app title sit in a flex row; subtitle spans full width centered below.
+        st.markdown(
+            f"""
+            <div>
+                <div style='display:flex; align-items:center; gap:16px;'>
+                    {logo_html}
+                    <h1 class='landing-title'>
+                        PDF Accessibility Assistant
+                    </h1>
+                </div>
+                <div style='
+                    text-align:center;
+                    font-family:"Roboto", sans-serif;
+                    font-size:12pt;
+                    color:#999799;
+                    margin:0 !important;
+                    padding:0 !important;
+                    line-height:1.4;
+                '>
+                    Brooklyn College Academic IT &nbsp;|&nbsp; City University of New York
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         st.markdown(
             f"<hr style='border:none; border-top:2px solid {BC_GRAY}; margin:10px 0 16px 0;'>",
@@ -2992,12 +3088,6 @@ def render_upload():
         with c3:
             render_step_card("3", "Fix & Download", "Work through each issue, then download the remediated file.")
 
-        st.info(
-            "**NYS compliance deadline:** CUNY must meet WCAG 2.2 Level AA by "
-            "**January 1, 2027** under Title II of the ADA.",
-            icon="📅",
-        )
-
         st.divider()
 
         # Copyright acknowledgment (left) and file uploader (right) side by side
@@ -3022,7 +3112,7 @@ def render_upload():
             )
             if not copyright_acknowledged:
                 st.markdown(
-                    "<p style='color:#862334; font-size:14pt; margin-top:6px;'>"
+                    "<p style='color:#882346; font-size:14pt; margin-top:6px;'>"
                     "Important: please check the box to enable file upload.</p>",
                     unsafe_allow_html=True,
                 )
@@ -3069,8 +3159,8 @@ def render_analyzing():
     Purpose: Analyze the uploaded PDF and route to the correct next step.
     This step is transient — the user never stays here long.
     """
-    st.title("♿ PDF Assistant")
-    st.divider()
+    render_page_header()
+    render_page_title("Analyzing your document")
 
     # ------------------------------------------------------------------
     # Preflight check — verify the temp directory is writable before
@@ -3125,7 +3215,8 @@ def render_password_protected():
     Purpose: Inform the user the file is password protected and offer options.
     Per CLAUDE.md: never ask for the password. Offer guidance instead.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Password-protected file")
     st.divider()
 
     # Security warning — verbatim from CLAUDE.md
@@ -3174,7 +3265,8 @@ def render_password_walkthrough():
     Purpose: Guide the user through removing password protection.
     After following the steps, the user returns to upload a new file.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("How to remove password protection")
     st.divider()
 
     st.markdown(
@@ -3253,7 +3345,8 @@ def render_scanned_doc():
     Accessibility note: the "ANALYSIS STOPPED" label uses text, not color alone,
     to communicate the severity — per WCAG 2.2 SC 1.4.1.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Scanned document detected")
     st.divider()
 
     # Tailor the opening line slightly based on whether only the cover is unreadable.
@@ -3328,7 +3421,8 @@ def render_scanned_goodbye():
       - Upload another file — resets state and returns to the upload screen
       - No, I'm done for now — ends the session
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("No changes made")
     st.divider()
 
     st.info(
@@ -3387,7 +3481,8 @@ def render_running_ocr():
       a clear error message is shown with a "Go back" button. We never crash
       silently — the user always sees actionable guidance.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Converting your document")
     st.divider()
 
     # Read the Tesseract path the user entered in the sidebar.
@@ -3530,7 +3625,8 @@ def render_running_easyocr():
     ocr_quality_score, ocr_quality_label, and ocr_engine_used in session_state,
     then returns to ocr_format_select for the faculty member to review.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Converting your document")
     st.divider()
 
     # Read the Tesseract path before the spinner so preflight can check it.
@@ -3650,7 +3746,8 @@ def render_ocr_format_select():
 
     File naming per CLAUDE.md: original name + '_readable' before the extension.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Choose your output format")
     st.divider()
 
     pages_text = st.session_state.ocr_pages_text
@@ -3924,7 +4021,8 @@ def render_no_issues():
     Purpose: Tell the user the document looks good. Offer download or end session.
     Verbatim message from CLAUDE.md.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("No issues found")
     st.divider()
 
     # Verbatim message from CLAUDE.md
@@ -3970,7 +4068,8 @@ def render_issue_list():
     User clicks any issue to start resolving it in any order they choose.
     Per CLAUDE.md: display the Priority Recommendation message verbatim first.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Accessibility Scan Results")
     st.divider()
 
     # Count remaining unresolved, unskipped issues
@@ -3986,54 +4085,79 @@ def render_issue_list():
         st.rerun()
         return
 
-    # File context
-    st.markdown(f"**File:** {st.session_state.file_name}")
+    # Priority Recommendation box — squeezed horizontally, white/maroon styling.
+    pad_l, msg_col, pad_r = st.columns([1, 4, 1])
+    with msg_col:
+        st.markdown(
+            """
+            <div style='
+                background-color: #ffffff;
+                border: 1px solid #882346;
+                border-radius: 6px;
+                padding: 14px 18px;
+                color: #000000;
+                font-size: 0.95rem;
+                line-height: 1.5;
+            '>
+            Review your results below. We strongly recommend starting with the
+            <strong>Red Light</strong> and <strong>Yellow Light</strong> issues first —
+            these create the most significant barriers for your students and are the
+            highest priority for accessibility compliance.<br><br>
+            Click on any issue label to begin the remediation process.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    # Priority Recommendation — verbatim from CLAUDE.md
-    st.info(
-        "We strongly recommend starting with the Red Light and Yellow Light issues. "
-        "These create the most significant barriers for your students and are the ones "
-        "that bring your document into compliance with Title II accessibility requirements. "
-        "Where would you like to start?"
+    # Filename — centered, below the recommendation box
+    st.markdown(
+        f"""
+        <h2 style='
+            text-align: center;
+            font-family: "Roboto", sans-serif;
+            font-size: 18pt;
+            font-weight: 400;
+            color: #882346;
+            margin: 16px 0 8px 0;
+        '>
+            The following issues were found in your uploaded file: {st.session_state.file_name}
+        </h2>
+        """,
+        unsafe_allow_html=True,
     )
 
-    # Group remaining issues by severity for display
-    # Order: red first, then yellow, then green — most serious to least serious
-    for severity in ["red", "yellow", "green"]:
+    # Group remaining issues by severity for display.
+    # Red / Yellow / Green rendered side-by-side in three equal columns.
+    col_red, col_yellow, col_green = st.columns([1, 1, 1])
+    severity_cols = {"red": col_red, "yellow": col_yellow, "green": col_green}
+
+    for severity, col in severity_cols.items():
         severity_issues = [i for i in remaining if i["severity"] == severity]
-        if not severity_issues:
-            continue
-
-        st.markdown(f"### {SEVERITY_LABELS[severity]}")
-
-        for issue in severity_issues:
-            # Each issue renders as a clickable button.
-            # The button label is the issue title.
-            if st.button(
-                f"{issue['title']}",
-                key=f"issue_btn_{issue['id']}",
-                use_container_width=True,
-            ):
-                st.session_state.current_issue_id = issue["id"]
-                st.session_state.proposed_fix = issue["fix_preview"]
-                if issue["id"] == "untagged_pdf":
-                    # Ask whether they have the original source file first.
-                    st.session_state.step = "source_file_question"
-                elif issue["id"] == "missing_alt_text":
-                    # Launch the per-image alt text workflow.
-                    # Initialise all workflow state from the issue's fix_data
-                    # so the sub-steps always start fresh.
-                    st.session_state.alt_text_images = issue.get("fix_data", {}).get("images", [])
-                    st.session_state.alt_text_index = 0
-                    st.session_state.alt_text_phase = "classifying"  # auto-classify first
-                    st.session_state.alt_text_results = {}
-                    st.session_state.alt_text_auto_classifications = {}
-                    st.session_state.step = "image_alt_text"
-                else:
-                    st.session_state.step = "resolving_issue"
-                st.rerun()
-
-        st.markdown("")  # Spacing between severity groups
+        with col:
+            st.markdown(f"### {SEVERITY_LABELS[severity]}")
+            if not severity_issues:
+                st.caption("No issues in this category.")
+                continue
+            for issue in severity_issues:
+                if st.button(
+                    issue["title"],
+                    key=f"issue_btn_{issue['id']}",
+                    use_container_width=True,
+                ):
+                    st.session_state.current_issue_id = issue["id"]
+                    st.session_state.proposed_fix = issue["fix_preview"]
+                    if issue["id"] == "untagged_pdf":
+                        st.session_state.step = "source_file_question"
+                    elif issue["id"] == "missing_alt_text":
+                        st.session_state.alt_text_images = issue.get("fix_data", {}).get("images", [])
+                        st.session_state.alt_text_index = 0
+                        st.session_state.alt_text_phase = "classifying"
+                        st.session_state.alt_text_results = {}
+                        st.session_state.alt_text_auto_classifications = {}
+                        st.session_state.step = "image_alt_text"
+                    else:
+                        st.session_state.step = "resolving_issue"
+                    st.rerun()
 
     # Progress indicator
     total    = len(st.session_state.issues)
@@ -4209,7 +4333,8 @@ def render_image_alt_text():
     Per CLAUDE.md: severity is reassigned based on the faculty member's answers —
     never apply a description without their explicit confirmation.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Image descriptions")
     st.divider()
 
     images  = st.session_state.alt_text_images
@@ -4798,7 +4923,8 @@ def render_source_file_question():
     member has the original source file. Working from the source is always
     the more reliable path — we want to route them there when possible.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Before we fix this issue")
     st.divider()
 
     st.markdown("### Before we dig in — a quick question.")
@@ -4851,7 +4977,8 @@ def render_cuny_resources():
     CUNY accessibility resources they need to fix it properly, then let them
     choose whether to work on that file now or continue remediating the PDF.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Accessibility resources")
     st.divider()
 
     st.markdown(
@@ -4922,6 +5049,57 @@ def render_cuny_resources():
 
 
 # -----------------------------------------------------------------------------
+# HELPER: render_issue_panels
+# Renders "Why this matters" and "Here's the plan" side by side.
+# Uses .issue-why-box and .issue-plan-box CSS classes so styling is centralized.
+# plan_text is optional — omit it when the plan section contains Streamlit widgets
+# that must be rendered separately below the why-box.
+# -----------------------------------------------------------------------------
+def render_issue_panels(why_text, plan_text=None):
+    """
+    Renders the why and plan sections side by side in styled boxes.
+    Both boxes share equal width. plan_text accepts plain text or basic HTML.
+    If plan_text is None, only the why-box is rendered (full width).
+    """
+    import html as _html
+
+    why_html = f"""
+        <div class='issue-why-box'>
+            <div class='issue-box-label'>Why this matters for your students</div>
+            {_html.escape(why_text).replace(chr(10), '<br>')}
+        </div>
+    """
+
+    if plan_text is not None:
+        col_why, col_plan = st.columns(2)
+        with col_why:
+            st.markdown(why_html, unsafe_allow_html=True)
+        with col_plan:
+            st.markdown(
+                f"<div class='issue-plan-box'>"
+                f"<div class='issue-box-label'>Here's the plan</div>"
+                f"{plan_text}</div>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.markdown(why_html, unsafe_allow_html=True)
+
+
+def render_plan_box(content_html):
+    """
+    Renders just the plan box (used when why-box was already rendered above
+    and the plan section stands alone below it).
+    content_html should be pre-formatted HTML.
+    """
+    st.markdown(
+        f"<div class='issue-plan-box'>"
+        f"<div class='issue-box-label'>Here's the plan</div>"
+        f"{content_html}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# -----------------------------------------------------------------------------
 # STEP: resolving_issue
 # Shows the issue details, applies a placeholder fix, then goes to QA step.
 # -----------------------------------------------------------------------------
@@ -4934,7 +5112,8 @@ def render_resolving_issue():
     When the faculty member clicks "No, let's try again.", an issue-specific
     alternative is offered before falling back to returning to the issue list.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Fixing an issue")
     st.divider()
 
     # Find the current issue by ID
@@ -4954,9 +5133,9 @@ def render_resolving_issue():
     st.markdown(f"*{issue['wcag']} | {issue['ada']}*")
     st.divider()
 
-    # Explain the issue and why it matters
-    st.markdown("**Why this matters for your students:**")
-    st.markdown(issue["description"])
+    # Render why-box only here — plan box is rendered per-issue below
+    # since each issue has different plan content (some include widgets).
+    render_issue_panels(issue["description"])
 
     st.divider()
 
@@ -5329,8 +5508,7 @@ def render_resolving_issue():
         issue_type  = fix_data.get("issue_type", "skip")
         heading_levels = fix_data.get("heading_levels", [])
 
-        st.markdown("**Here's what we found — and how we'll fix it:**")
-        st.info(issue["fix_preview"])
+        render_plan_box(issue["fix_preview"])
 
         if issue_type == "skip" and heading_levels:
             st.markdown("**Detected heading sequence** (problems marked in bold):")
@@ -5341,17 +5519,20 @@ def render_resolving_issue():
         # when the document is converted to DOCX. Show both the plan and the
         # reason why, so the faculty member can make an informed decision.
         # Second button skips this issue and returns to the issue list.
-        st.markdown("**Here's the plan — does this work for you?**")
-        st.info(
-            "**What we'll do:** I'll convert this document to a structured Word "
-            "document (.docx) that preserves your headings, paragraphs, and reading "
-            "order. You can then re-save it as a properly tagged PDF from Word or "
-            "Google Docs.\n\n"
-            "**Why a Word document?** This PDF has no accessibility tags, and adding "
-            "them directly requires specialized tools like Adobe Acrobat Pro. Converting "
-            "to Word gives your content real heading styles, list formatting, and a "
-            "correct reading order built in from the start — and re-saving from Word "
-            "produces a properly tagged, accessible PDF."
+        render_plan_box(
+            "<strong>What we'll do:</strong> Convert this document to a Word file (.docx) "
+            "with your text content extracted. Because this PDF has no accessibility tags, "
+            "the Word file won't have heading structure yet — <strong>you'll need to apply "
+            "heading styles, set the correct reading order, and add structure</strong> in "
+            "Word or Google Docs before re-saving as a PDF.<br><br>"
+            "<strong>Why Word?</strong> Adding accessibility tags directly to a PDF requires "
+            "specialized tools like Adobe Acrobat Pro. Word and Google Docs have built-in "
+            "heading styles and structure tools that are much easier to work with — and "
+            "re-saving from Word produces a properly tagged, accessible PDF.<br><br>"
+            "<strong>Tip:</strong> Use Word's built-in Accessibility Checker "
+            "(Review → Check Accessibility) as you work. For a step-by-step guide, see the "
+            "<a href='https://guides.cuny.edu/accessibility/microsoft_word' target='_blank'>"
+            "CUNY Making Word Documents Accessible</a> guide."
         )
 
         col1, col2 = st.columns(2)
@@ -5369,7 +5550,12 @@ def render_resolving_issue():
                 use_container_width=True,
                 key="confirm_no",
             ):
-                _skip_issue()
+                # Return to issue list without resolving or skipping —
+                # the issue stays on the list so the user can come back to it.
+                st.session_state.current_issue_id    = None
+                st.session_state.showing_alternative = False
+                st.session_state.step                = "issue_list"
+                st.rerun()
 
         _render_abandon_button()
         return
@@ -5403,7 +5589,6 @@ def render_resolving_issue():
             "English (United States)",
         )
 
-        st.markdown("**Here's the plan — does this work for you?**")
         st.info(
             f"**What we'll do:** Add the language tag **{_lang_display_name(lang_code)}** "
             f"(`{lang_code}`) to your document's metadata.\n\n"
@@ -5453,7 +5638,7 @@ def render_resolving_issue():
         color_count = issue.get("fix_data", {}).get("color_count", 0)
         file_stem = (st.session_state.file_name or "document").rsplit(".", 1)[0]
 
-        st.markdown("**We noticed colored text in your document.**")
+        st.markdown("**Colored text detected in your document**")
         st.markdown(
             f"This document uses **{color_count} distinct text colors**. "
             "Color can create accessibility barriers in a few ways — most of which "
@@ -5523,8 +5708,7 @@ def render_resolving_issue():
         return
 
     else:
-        st.markdown("**Here's what I changed. Does this look right to you?**")
-        st.info(issue["fix_preview"])
+        render_plan_box(issue["fix_preview"])
         confirmed_title = None  # not used for other issue types
 
     # Faculty confirmation — exactly two choices per CLAUDE.md
@@ -5575,7 +5759,8 @@ def render_continue_or_stop():
     Purpose: Give the user a natural pause after each resolved issue.
     Per CLAUDE.md: ask "keep going?" after every issue.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Keep going?")
     st.divider()
 
     resolved = len(st.session_state.resolved_ids)
@@ -5627,7 +5812,8 @@ def render_re_analysis():
     Re-analysis calls analyze_pdf() on the current working copy so resolved
     issues are removed and any newly introduced issues are surfaced.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Re-checking your document")
     st.divider()
 
     # Verbatim message from CLAUDE.md
@@ -5767,7 +5953,8 @@ def render_manual_review():
         "green":  "🟢 Green Light",
     }
 
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Manual review checklist")
     st.divider()
 
     st.markdown("### One more step — a quick manual check")
@@ -5912,7 +6099,8 @@ def render_choose_format():
 
     Per CLAUDE.md: file name gets "_edited" appended before the extension.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("Save your file")
     st.divider()
 
     resolved = len(st.session_state.resolved_ids)
@@ -6015,7 +6203,8 @@ def render_done():
     Purpose: Gracefully end the session.
     Shown when user chooses to walk away (password, scanned doc) or finishes.
     """
-    st.title("♿ PDF Assistant")
+    render_page_header()
+    render_page_title("All done")
     st.divider()
 
     reason = st.session_state.get("done_reason", "")
@@ -6092,24 +6281,120 @@ STEP_HANDLERS = {
 st.markdown(
     """
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400&family=Roboto+Slab:wght@700&display=swap');
+
+    /* Reduce Streamlit's default large top gap above all content */
+    .block-container {
+        padding-top: 3rem !important;
+    }
+    /* Page-level H1 titles — Roboto Slab, BC Maroon, ~22pt */
     h1 {
-        font-size: 2rem !important;
+        font-family: 'Roboto Slab', Georgia, serif !important;
+        font-size: 1.85rem !important;
+        font-weight: 700 !important;
+        color: #882346 !important;
+    }
+    /* Landing page app title — overrides the global h1 rule */
+    h1.landing-title {
+        font-family: sans-serif !important;
+        font-size: 24pt !important;
+        font-weight: 700 !important;
+        line-height: 1.25 !important;
+        color: #882346 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    /* Global H2 — Roboto regular, mid gray, ~16pt */
+    h2 {
+        font-family: 'Roboto', sans-serif !important;
+        font-size: 1.35rem !important;
+        font-weight: 400 !important;
+        color: #999799 !important;
     }
     h3 {
-        color: #862334 !important;
-        font-size: 1.25rem !important;
+        color: #882346 !important;
+        font-size: 1.17rem !important;
     }
     [data-testid="stFileUploader"] {
         margin-top: 0 !important;
     }
     [data-testid="stFileUploaderDropzone"] {
-        border: 2px solid #862334 !important;
+        border: 2px solid #882346 !important;
         border-radius: 6px !important;
         min-height: 120px !important;
         margin-top: 0 !important;
     }
     [data-testid="stFileUploader"] .stMarkdown {
         margin-bottom: 0 !important;
+    }
+
+    /* Issue panel boxes — used by render_issue_panels() */
+    .issue-why-box {
+        background-color: #ffffff;
+        border: 1px solid #999799;
+        border-radius: 6px;
+        padding: 16px 18px;
+        height: 100%;
+    }
+    .issue-plan-box {
+        background-color: #ffffff;
+        border: 1px solid #882346;
+        border-radius: 6px;
+        padding: 16px 18px;
+        height: 100%;
+    }
+    .issue-box-label {
+        font-size: 0.8rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #999799;
+        margin-bottom: 8px;
+    }
+    .issue-plan-box .issue-box-label {
+        color: #882346;
+    }
+
+    /* Primary buttons — semi-transparent maroon, full opacity on hover/active */
+    [data-testid="stBaseButton-primary"],
+    .stButton > button[kind="primary"] {
+        background-color: rgba(136, 35, 70, 0.70) !important;
+        color: #ffffff !important;
+        border: none !important;
+        transition: background-color 0.15s ease !important;
+    }
+    [data-testid="stBaseButton-primary"]:hover,
+    .stButton > button[kind="primary"]:hover {
+        background-color: #882346 !important;
+        color: #ffffff !important;
+        border: none !important;
+    }
+    [data-testid="stBaseButton-primary"]:active,
+    .stButton > button[kind="primary"]:active {
+        background-color: #882346 !important;
+        color: #ffffff !important;
+        border: none !important;
+    }
+
+    /* Secondary buttons — white background, gray on hover/active */
+    [data-testid="stBaseButton-secondary"],
+    .stButton > button[kind="secondary"] {
+        background-color: #ffffff !important;
+        color: #000000 !important;
+        border: 1px solid #999799 !important;
+        transition: background-color 0.15s ease !important;
+    }
+    [data-testid="stBaseButton-secondary"]:hover,
+    .stButton > button[kind="secondary"]:hover {
+        background-color: #F0F2F6 !important;
+        color: #000000 !important;
+        border: 1px solid #999799 !important;
+    }
+    [data-testid="stBaseButton-secondary"]:active,
+    .stButton > button[kind="secondary"]:active {
+        background-color: #F0F2F6 !important;
+        color: #000000 !important;
+        border: 1px solid #999799 !important;
     }
     </style>
     """,
@@ -6134,13 +6419,14 @@ st.caption(
     "constitute legal advice. Always consult your institution's accessibility office."
 )
 st.markdown(
-    "<p style='color:#58595B; font-size:0.8rem; margin-top:4px;'>"
+    "<p style='color:#999799; font-size:0.8rem; margin-top:4px;'>"
     "Developed by "
-    "<a href='mailto:mgluzman@brooklyn.cuny.edu' style='color:#862334;'>"
+    "<a href='mailto:mgluzman@brooklyn.cuny.edu' style='color:#882346;'>"
     "<strong>Mariya Gluzman</strong></a>, Instructional Designer, "
     "Brooklyn College Academic IT &nbsp;·&nbsp; "
     "Built in collaboration with <strong>Claude Code</strong> (Anthropic) &nbsp;·&nbsp; "
-    "<a href='https://creativecommons.org/licenses/by-nc-sa/4.0/' style='color:#58595B;' "
-    "target='_blank'>CC BY-NC-SA 4.0</a></p>",
+    "<a href='https://creativecommons.org/licenses/by-nc-sa/4.0/' style='color:#999799;' "
+    "target='_blank'>CC BY-NC-SA 4.0</a> &nbsp;·&nbsp; "
+    "<span style='color:#999799;'>v0.3 — Phase 2</span></p>",
     unsafe_allow_html=True,
 )
