@@ -2759,10 +2759,11 @@ def init_state():
         "skipped_ids": [],          # Issue IDs the user explicitly skipped via the alternative path
         "showing_alternative": False,  # True when the post-rejection alternative UI is active
         "ocr_download_mode": False,    # True when user chose "download and review first" on OCR screen
+        "untagged_pdf_pending": False, # True when user accepted the untagged fix but hasn't downloaded yet
         "manual_review_results": {},   # {item_id: "ok" | "attention"} — responses on manual review screen
         "resolved_count": 0,        # Running count of resolved issues (drives re-analysis)
         "current_issue_id": None,   # ID of the issue currently being worked on
-        "proposed_fix": None,       # Text of the fix shown during QA confirmation
+        "proposed_fix": None,       # Reserved — set at issue selection, cleared on resolve/abandon
         "reanalysis_done": False,   # Whether re-analysis was offered at the current checkpoint
         "cover_page_only": False,   # True if only page 1 is unreadable (page 2 has text)
         "ocr_pages_text": [],       # List of strings — one per page — from run_ocr()
@@ -3027,44 +3028,46 @@ def render_upload():
             "alt='Brooklyn College logo'>"
         )
 
+    # Header — spans full width before the column split.
+    # Logo + app title sit in a flex row; subtitle spans full width below.
+    st.markdown(
+        f"""
+        <div>
+            <div style='display:flex; align-items:center; gap:16px;'>
+                {logo_html}
+                <h1 class='landing-title'>
+                    PDF Accessibility Assistant
+                </h1>
+            </div>
+            <div style='
+                text-align:left;
+                font-family:"Roboto", sans-serif;
+                font-size:13pt;
+                letter-spacing:0.06em;
+                color:#999799;
+                margin:0 !important;
+                padding-left:10px;
+                padding-top:10px;
+                line-height:1.4;
+            '>
+                Brooklyn College Academic IT &nbsp;&nbsp;|&nbsp;&nbsp; The City University of New York
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"<hr style='border:none; border-top:2px solid {BC_GRAY}; margin:10px 0 16px 0;'>",
+        unsafe_allow_html=True,
+    )
+
     # ------------------------------------------------------------------
     # All content sits in the left 6/7 of the screen; the rightmost 1/7
     # is intentionally blank — equivalent to a [2, 2, 2, 1] column split.
     # ------------------------------------------------------------------
     col_main, col_blank = st.columns([6, 1])
     with col_main:
-
-        # Header — full-width single HTML block, no inner column split.
-        # Logo + app title sit in a flex row; subtitle spans full width centered below.
-        st.markdown(
-            f"""
-            <div>
-                <div style='display:flex; align-items:center; gap:16px;'>
-                    {logo_html}
-                    <h1 class='landing-title'>
-                        PDF Accessibility Assistant
-                    </h1>
-                </div>
-                <div style='
-                    text-align:center;
-                    font-family:"Roboto", sans-serif;
-                    font-size:12pt;
-                    color:#999799;
-                    margin:0 !important;
-                    padding:0 !important;
-                    line-height:1.4;
-                '>
-                    Brooklyn College Academic IT &nbsp;|&nbsp; City University of New York
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            f"<hr style='border:none; border-top:2px solid {BC_GRAY}; margin:10px 0 16px 0;'>",
-            unsafe_allow_html=True,
-        )
 
         # About
         st.markdown(
@@ -3121,6 +3124,7 @@ def render_upload():
                 f"<h3 style='color:{BC_MAROON}; margin:0 0 0 0;'>Choose a PDF file to check</h3>",
                 unsafe_allow_html=True,
             )
+            st.caption("This tool accepts PDF files only (.pdf).")
             uploaded_file = st.file_uploader(
                 label="Choose a PDF file to check",
                 type=["pdf"],
@@ -4102,7 +4106,8 @@ def render_issue_list():
             Review your results below. We strongly recommend starting with the
             <strong>Red Light</strong> and <strong>Yellow Light</strong> issues first —
             these create the most significant barriers for your students and are the
-            highest priority for accessibility compliance.<br><br>
+            highest priority for accessibility compliance. Fixing some Red Light issues
+            may also resolve other issues automatically.<br><br>
             Click on any issue label to begin the remediation process.
             </div>
             """,
@@ -4168,6 +4173,15 @@ def render_issue_list():
     if skipped:
         caption += f" · {skipped} skipped"
     st.caption(caption)
+
+    # Download button — only shown once at least one issue has been resolved
+    if resolved > 0:
+        if st.button(
+            "Download my progress so far",
+            use_container_width=True,
+        ):
+            st.session_state.step = "choose_format"
+            st.rerun()
 
     _render_go_back("upload")
 
@@ -5064,9 +5078,11 @@ def render_issue_panels(why_text, plan_text=None):
     import html as _html
 
     why_html = f"""
-        <div class='issue-why-box'>
-            <div class='issue-box-label'>Why this matters for your students</div>
-            {_html.escape(why_text).replace(chr(10), '<br>')}
+        <div class='issue-box-wrapper'>
+            <div class='issue-why-box'>
+                <div class='issue-box-label'>Why this matters for your students</div>
+                {_html.escape(why_text).replace(chr(10), '<br>')}
+            </div>
         </div>
     """
 
@@ -5076,9 +5092,10 @@ def render_issue_panels(why_text, plan_text=None):
             st.markdown(why_html, unsafe_allow_html=True)
         with col_plan:
             st.markdown(
+                f"<div class='issue-box-wrapper'>"
                 f"<div class='issue-plan-box'>"
                 f"<div class='issue-box-label'>Here's the plan</div>"
-                f"{plan_text}</div>",
+                f"{plan_text}</div></div>",
                 unsafe_allow_html=True,
             )
     else:
@@ -5092,9 +5109,10 @@ def render_plan_box(content_html):
     content_html should be pre-formatted HTML.
     """
     st.markdown(
+        f"<div class='issue-box-wrapper'>"
         f"<div class='issue-plan-box'>"
         f"<div class='issue-box-label'>Here's the plan</div>"
-        f"{content_html}</div>",
+        f"{content_html}</div></div>",
         unsafe_allow_html=True,
     )
 
@@ -5543,7 +5561,14 @@ def render_resolving_issue():
                 use_container_width=True,
                 key="confirm_yes",
             ):
-                _apply_and_advance()
+                # Don't mark resolved yet — the actual fix (DOCX conversion)
+                # happens at download time. Set a flag so choose_format can
+                # mark it resolved when the user actually receives the file.
+                st.session_state.untagged_pdf_pending = True
+                st.session_state.current_issue_id    = None
+                st.session_state.showing_alternative = False
+                st.session_state.step                = "choose_format"
+                st.rerun()
         with col2:
             if st.button(
                 "No, not now.",
@@ -5947,11 +5972,7 @@ def render_manual_review():
         },
     ]
 
-    SEVERITY_LABEL = {
-        "red":    "🔴 Red Light",
-        "yellow": "🟡 Yellow Light",
-        "green":  "🟢 Green Light",
-    }
+    SEVERITY_LABEL = SEVERITY_LABELS
 
     render_page_header()
     render_page_title("Manual review checklist")
@@ -6099,6 +6120,14 @@ def render_choose_format():
 
     Per CLAUDE.md: file name gets "_edited" appended before the extension.
     """
+    # If the user accepted the untagged PDF fix, mark it resolved now that
+    # they've reached the download screen and the DOCX is about to be built.
+    if st.session_state.get("untagged_pdf_pending"):
+        if "untagged_pdf" not in st.session_state.resolved_ids:
+            st.session_state.resolved_ids.append("untagged_pdf")
+            st.session_state.resolved_count += 1
+        st.session_state.untagged_pdf_pending = False
+
     render_page_header()
     render_page_title("Save your file")
     st.divider()
@@ -6124,6 +6153,14 @@ def render_choose_format():
     # This is the fully remediated document: proper heading structure, images
     # embedded with alt text set on the Word alt text field, font fixes, etc.
     # -------------------------------------------------------------------------
+    if "untagged_pdf" in st.session_state.resolved_ids:
+        st.warning(
+            "⚠️ **Heading structure may need review.** Because this document had no "
+            "accessibility tags, heading styles in the Word file were inferred from "
+            "font sizes — they may not perfectly match the document's intended structure. "
+            "Please review headings in Word before re-publishing."
+        )
+
     st.markdown("### Download your remediated Word document")
     st.markdown(
         "Your document has been rebuilt with all accessibility fixes applied — "
@@ -6329,6 +6366,12 @@ st.markdown(
     }
 
     /* Issue panel boxes — used by render_issue_panels() */
+    .issue-box-wrapper {
+        max-width: clamp(320px, 80%, 860px);
+        margin-left: auto;
+        margin-right: auto;
+        margin-bottom: 12px;
+    }
     .issue-why-box {
         background-color: #ffffff;
         border: 1px solid #999799;
@@ -6344,7 +6387,7 @@ st.markdown(
         height: 100%;
     }
     .issue-box-label {
-        font-size: 0.8rem;
+        font-size: 1.15rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.05em;
@@ -6395,6 +6438,21 @@ st.markdown(
         background-color: #F0F2F6 !important;
         color: #000000 !important;
         border: 1px solid #999799 !important;
+    }
+
+    /* Button typography */
+    [data-testid="stBaseButton-primary"] p,
+    [data-testid="stBaseButton-secondary"] p,
+    .stButton > button p {
+        font-family: "Roboto Slab", serif !important;
+        font-size: 1.15rem !important;
+    }
+
+    /* Button spacing */
+    [data-testid="stBaseButton-primary"],
+    [data-testid="stBaseButton-secondary"],
+    .stButton > button {
+        margin-top: 1.25rem !important;
     }
     </style>
     """,

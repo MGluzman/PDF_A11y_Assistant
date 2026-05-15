@@ -1,10 +1,43 @@
 # To Do Next — Agentic AI Accessibility Suite
 
-**Last updated:** 2026-05-14 (session 3)
+**Last updated:** 2026-05-15 (session 4)
 
 ---
 
 ## PDF Assistant — Active Work
+
+### 🔴 PRIORITY: 12. Decorative & removed image verification UI
+The Manual Review Checklist has a "Decorative image verification" item but no
+mechanism to show the user WHICH images were auto-classified as decorative or
+removed as artifacts. Users can't verify what they can't see.
+
+Two sub-tasks:
+- **Decorative image verification** — on the checklist item, display thumbnails
+  of all images marked decorative (type="decorative") so faculty can confirm
+  none were misclassified.
+- **Removed image recovery** — on the checklist item, display thumbnails of all
+  images marked as artifact or background, with an option to reinstate any that
+  were wrongly excluded (un-remove and re-enter the alt text workflow for that image).
+
+---
+
+### 🔴 PRIORITY: 11. Go Back navigation in image alt text workflow
+The image alt text workflow (per-image screens: question_1, question_2, enter_text)
+needs a Go Back button to return to the preceding image. The Abandon button exists
+for exiting the whole workflow, but users need finer-grained navigation within it.
+Per the existing step navigation map in CLAUDE.md. Other screens don't need Go Back
+since Abandon covers the exit case adequately.
+
+---
+
+### 🔴 PRIORITY: 10. Download mid-session from continue_or_stop screen (Option A)
+After each resolved issue, the `continue_or_stop` screen asks "Yes, let's keep
+going" or "No, I'm done for now." Add a third button — **"Download what I have
+so far"** — that goes directly to `choose_format` without requiring the user to
+stop working entirely. This pairs with Option B (already implemented on the issue
+list) to give users a natural download checkpoint right after every fix.
+
+---
 
 ### ~~1. ⚡ Use Docling PICTURE detections for image alt text~~ ✅ Done 2026-04-16
 All 5 sub-steps implemented:
@@ -102,6 +135,19 @@ Presents a structured checklist of manually-verifiable items with:
 ---
 
 ### ~~7. Stale "Phase 1" comments in app.py~~ ✅ Done 2026-04-16
+
+---
+
+### 13. Code simplification wins (low risk, maintenance value)
+Three refactors identified in audit — none affect functionality:
+
+- **`_reset_session()` helper** — session state reset is duplicated in 3 places
+  (upload screen, abandon button, start-over). Extract into one helper function.
+- **`_render_bc_logo(width)` helper** — BC logo base64 encoding is done twice
+  (sidebar header and landing page header). Extract into one helper.
+- **Alt text workflow sub-functions** — `render_image_alt_text()` is ~500 lines.
+  Split into per-phase functions (`_render_classifying()`, `_render_bulk_review()`,
+  `_render_per_image()`, `_render_summary()`) for readability and easier debugging.
 
 ---
 
