@@ -4766,6 +4766,13 @@ def render_image_alt_text():
                     "page": current["page"],
                 }
                 st.session_state.alt_text_results = results
+                # Toast persists briefly across the rerun so the faculty member
+                # sees confirmation before the next image appears.
+                st.toast(
+                    f"Image {index + 1} marked as decorative — "
+                    "empty alt text will be applied in the output.",
+                    icon="✅",
+                )
                 _advance_alt_text_image()
 
         with col2:
