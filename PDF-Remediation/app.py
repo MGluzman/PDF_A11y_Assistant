@@ -1986,7 +1986,15 @@ def analyze_pdf(file_bytes):
         # Only runs when Docling succeeded (docling_doc is not None).
         # The bbox conversion from BOTTOMLEFT (Docling default) to TOPLEFT
         # (PyMuPDF rendering convention) uses to_top_left_origin(page_height).
+        #
+        # DEDUPLICATION: Docling is added only for pages where PyMuPDF found no
+        # XObjects. For digital PDFs, PyMuPDF already captures all embedded images
+        # as XObjects; adding Docling's PICTURE detections for those same pages
+        # creates duplicate entries in alt_text_images, causing the workflow to
+        # cycle back through images the user already reviewed.
+        # Docling fills the gap only for scanned pages where PyMuPDF finds nothing.
         if docling_doc is not None:
+            pymupdf_pages = {img["page"] for img in images if img["source"] == "pymupdf"}
             try:
                 for item, _ in docling_doc.iterate_items():
                     if not hasattr(item, "label") or item.label != DocItemLabel.PICTURE:
@@ -1995,6 +2003,10 @@ def analyze_pdf(file_bytes):
                         continue
                     prov    = item.prov[0]
                     page_no = prov.page_no   # 1-based
+                    # Skip pages where PyMuPDF already detected XObject images —
+                    # those detections cover the same images and would cause duplicates.
+                    if page_no in pymupdf_pages:
+                        continue
                     try:
                         page_height = docling_doc.pages[page_no].size.height
                         tl          = prov.bbox.to_top_left_origin(page_height)
