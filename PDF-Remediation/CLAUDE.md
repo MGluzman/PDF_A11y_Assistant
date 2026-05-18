@@ -58,7 +58,7 @@ Rules:
 - Does NOT appear on: upload, analyzing, OCR screens, no_issues, done, issue_list
 
 Screens where Abandon is shown:
-- `image_alt_text` (all phases: classifying, bulk_review, summary, question_1/2, enter_text)
+- `image_alt_text` (all phases: classifying, bulk_review, summary, question_1, enter_text)
 - `source_file_question`
 - `cuny_resources`
 - `resolving_issue`
@@ -69,7 +69,7 @@ Screens where Abandon is shown:
 ---
 
 ### 3. Image-level navigation — within the alt text workflow only
-Three buttons appear at the bottom of every per-image phase (question_1, question_2,
+Three buttons appear at the bottom of every per-image phase (question_1,
 enter_text) to move between images without abandoning the whole workflow:
 
 | Button | Behavior |
@@ -103,7 +103,9 @@ These appear ABOVE the Abandon button, which is always the very last element.
     below), then present the full issue list as a clickable menu — the user can select
     any issue in any order to work on it. After each issue is resolved, save the updated
     file immediately (see File Saving Rule below), return to the issue list, and ask:
-    "Yes, let's keep going." or "No, I'm done for now."
+    "Yes, let's keep going." or "No, I'm done for now." A third option —
+    "Download what I have so far" — lets the user download the current output
+    without stopping; they can continue working afterward.
     If the user chooses to stop, proceed to step 11.
     After every three issues have been resolved, offer a re-analysis before continuing
     (see Re-Analysis Check below).
@@ -527,20 +529,14 @@ Faculty can still choose any of the three options regardless of the suggestion.
 
 | Button | Action |
 |--------|--------|
-| **It's decorative** | `type="decorative"`, `severity="green"`, empty alt text |
+| **It's decorative** | `type="decorative"`, `severity="green"`, empty alt text. Toast confirmation shown. |
 | **It's a scan artifact — remove it** | `type="artifact"`, `severity="green"`, excluded from output |
-| **It carries information** | Advance to Question 2 |
+| **It carries information** | `type="informational"`, `severity="yellow"` → enter_text |
 
-#### Question 2 — Critical or supplementary?
-
-> "Does understanding this image affect how your students understand the document?
-> For example, a chart, diagram, map, or figure that presents information not
-> described in the surrounding text."
-
-| Answer | Result |
-|--------|--------|
-| Yes, critical | `type="critical"`, `severity="red"` → enter_text (full description) |
-| No, supplementary | `type="supplementary"`, `severity="yellow"` → enter_text (brief description) |
+There is no Question 2. "It carries information" goes directly to the description
+entry screen. All informational images are treated the same regardless of whether
+they are charts, photos, or figures — the faculty member writes one description
+that covers whatever the image conveys.
 
 ---
 
@@ -548,11 +544,10 @@ Faculty can still choose any of the three options regardless of the suggestion.
 
 | Classification | Severity | Output behavior |
 |----------------|----------|-----------------|
-| Decorative | 🟢 Green | Empty alt text in output |
-| Background | 🟢 Green | Excluded from DOCX output |
-| Scan artifact / edge artifact | 🟢 Green | Excluded from DOCX output |
-| Informational + critical | 🔴 Red | Full alt text description required |
-| Informational + supplementary | 🟡 Yellow | Brief alt text description required |
+| Decorative | 🟢 Green | Empty alt text (`descr=""`) in output — screen readers skip it |
+| Background | 🟢 Green | Excluded from DOCX output entirely |
+| Scan artifact / edge artifact | 🟢 Green | Excluded from DOCX output entirely |
+| Informational | 🟡 Yellow | Faculty-written alt text description embedded in output |
 
 ---
 
@@ -575,13 +570,19 @@ Group images into three sections:
 ---
 
 ### Alt Text Rules
-- For Red and Yellow images, generate a description and ask the faculty member to
-  review, edit, or approve it — never apply alt text without confirmation
-- Descriptions should be concise but complete — what the image shows and why it matters
-- For decorative images, apply empty alt text automatically after confirmation
-- For artifacts/backgrounds, no description needed — just confirm removal
+- For informational images, the faculty member writes the description themselves —
+  the app does not generate one. The enter_text screen prompts them to describe
+  what the image shows and why it matters in the context of the document.
+- Descriptions should be concise but complete — a student who cannot see the image
+  should understand what it conveys from the description alone.
+- For decorative images, empty alt text (`descr=""`) is applied automatically and a
+  toast notification confirms the classification was saved before advancing.
+- For artifacts and backgrounds, no description is needed — the image is excluded
+  from the DOCX output entirely.
 - Never fabricate meaning — if image content is unclear, describe what is visible
-  and flag it for the faculty member to complete
+  and flag it for the faculty member to complete.
+- The enter_text screen has a "← Back to classification" button so faculty can
+  return to question_1 and change their answer if needed.
 
 ### 🟡 Yellow Light — Moderate
 Issues that significantly affect users who rely on assistive technology or who
@@ -748,7 +749,7 @@ they require a human to evaluate the content.
 | Table structure correctness | 🟡 Moderate | Are header cells actually marked as headers, or just visually bold? Does the table read logically row by row without relying on visual layout? |
 | Abbreviations on first use | 🟢 Lower priority | Are acronyms and discipline-specific abbreviations spelled out the first time they appear? (e.g., "CUNY — City University of New York") |
 | Non-English passages | 🟢 Lower priority | Does the document include quotes or passages in another language? Those sections should have their own language tag so screen readers switch pronunciation rules. |
-| Decorative image verification | 🟢 Lower priority | Review any images the app auto-classified as decorative or removed as artifacts — confirm no content image was accidentally excluded. |
+| Decorative image verification | 🟢 Lower priority | Review thumbnails of images marked decorative and images removed as artifacts. If any content image was accidentally excluded, a Reinstate button sends it back through the alt text workflow (question_1 → enter_text) and returns here when done. |
 
 ### Guidance shown when "Needs attention" is selected
 
