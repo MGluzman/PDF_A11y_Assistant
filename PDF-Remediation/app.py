@@ -2464,7 +2464,7 @@ def build_docx_from_pdf(pdf_bytes):
     # Types whose images should be excluded from the output entirely.
     REMOVED_TYPES     = {"artifact", "background", "edge_artifact"}
     # Types whose images carry an approved description worth writing out.
-    INFORMATIONAL_TYPES = {"critical", "supplementary"}
+    INFORMATIONAL_TYPES = {"informational"}
 
     if docling_doc is not None:
         try:
@@ -4196,15 +4196,13 @@ def render_issue_list():
 #   classifying  — runs auto_classify_image() on all images (transient spinner)
 #   bulk_review  — shows high-confidence detections for one-click bulk removal
 #   question_1   — three-option choice: decorative / artifact / informational
-#   question_2   — critical or supplementary? (only if informational)
-#   enter_text   — enter or edit the alt text description
+#   enter_text   — write the alt text description (reached directly from question_1)
 #   summary      — review all decisions before confirming
 #
 # Per CLAUDE.md Image Remediation Workflow:
-#   Background / Edge artifact  → Green, excluded from DOCX output
-#   Decorative                  → Green, empty alt text, no description needed
-#   Not decorative, critical    → stays Red, full description required
-#   Not decorative, not critical → Yellow, brief description required
+#   Background / Edge artifact → Green, excluded from DOCX output
+#   Decorative                 → Green, empty alt text, no description needed
+#   Informational              → Yellow, description required (written by faculty)
 # =============================================================================
 
 def _render_go_back(destination):
@@ -4300,7 +4298,7 @@ def _render_image_nav_buttons(index, total, img_key, current, results):
             # Preserves alt text the faculty member already entered if they are
             # navigating back through previously reviewed images.
             _COMPLETE = {"decorative", "artifact", "background",
-                         "edge_artifact", "critical", "supplementary"}
+                         "edge_artifact", "informational"}
             if results.get(img_key, {}).get("type") not in _COMPLETE:
                 results[img_key] = {
                     "type": "skipped",
@@ -4589,8 +4587,14 @@ def render_image_alt_text():
                     st.session_state.resolved_ids.append("missing_alt_text")
                     st.session_state.resolved_count += 1
 
+                # If the user reinstated an image from manual_review, return there
+                # instead of the normal post-confirmation flow.
+                return_to = st.session_state.get("alt_text_return_to")
+                if return_to:
+                    del st.session_state["alt_text_return_to"]
+                    st.session_state.step = return_to
                 # Trigger re-analysis check per CLAUDE.md (every 3 resolved issues).
-                if (
+                elif (
                     st.session_state.resolved_count % 3 == 0
                     and not st.session_state.reanalysis_done
                 ):
@@ -4679,7 +4683,7 @@ def render_image_alt_text():
         # result and let them keep or change it — don't force re-classification.
         # This prevents "Skip this image" from silently erasing completed work.
         COMPLETE_TYPES = {"decorative", "artifact", "background", "edge_artifact",
-                          "critical", "supplementary"}
+                          "informational"}
         existing_result = results.get(img_key, {})
         if existing_result.get("type") in COMPLETE_TYPES:
             kind = existing_result["type"]
@@ -4689,8 +4693,7 @@ def render_image_alt_text():
                 "artifact":      "Scan artifact — will be excluded from output",
                 "background":    "Page background — will be excluded from output",
                 "edge_artifact": "Edge artifact — will be excluded from output",
-                "critical":      f"Critical — description saved: \"{alt}\"",
-                "supplementary": f"Supplementary — description saved: \"{alt}\"",
+                "informational": f"Informational — description saved: \"{alt}\"",
             }
             st.success(f"✓ Already classified: **{label_map.get(kind, kind)}**")
             st.markdown(
@@ -4717,6 +4720,7 @@ def render_image_alt_text():
                     st.session_state.alt_text_results = results
                     st.rerun()
             _render_image_nav_buttons(index, total, img_key, current, results)
+            _render_abandon_button()
             return
 
         # Auto-classification suggestion badge — shown when confidence is below
@@ -4797,51 +4801,8 @@ def render_image_alt_text():
                 use_container_width=True,
                 key=f"q1_info_{index}",
             ):
-                st.session_state.alt_text_phase = "question_2"
-                st.rerun()
-
-        _render_image_nav_buttons(index, total, img_key, current, results)
-
-    # -------------------------------------------------------------------------
-    # QUESTION 2 — Is it critical to understanding?
-    # Per CLAUDE.md: verbatim question with example types.
-    # -------------------------------------------------------------------------
-    elif phase == "question_2":
-        st.markdown("### Does understanding this image affect how your students understand the document?")
-        st.markdown(
-            "An image is critical to understanding if it presents information that "
-            "isn't described in the surrounding text — for example, a chart, diagram, "
-            "map, or figure that students need to interpret the content."
-        )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(
-                "Yes, it's important for understanding.",
-                type="primary",
-                use_container_width=True,
-                key=f"q2_yes_{index}",
-            ):
-                # Critical → stays Red, full description required.
                 results[img_key] = {
-                    "type": "critical",
-                    "severity": "red",
-                    "alt_text": "",
-                    "page": current["page"],
-                }
-                st.session_state.alt_text_results = results
-                st.session_state.alt_text_phase = "enter_text"
-                st.rerun()
-
-        with col2:
-            if st.button(
-                "No, it adds context but isn't essential.",
-                use_container_width=True,
-                key=f"q2_no_{index}",
-            ):
-                # Non-critical → downgraded to Yellow, brief description needed.
-                results[img_key] = {
-                    "type": "supplementary",
+                    "type": "informational",
                     "severity": "yellow",
                     "alt_text": "",
                     "page": current["page"],
@@ -4850,18 +4811,10 @@ def render_image_alt_text():
                 st.session_state.alt_text_phase = "enter_text"
                 st.rerun()
 
-        # Back to Question 1 to change the classification entirely.
-        st.divider()
-        if st.button(
-            "← Back to classification",
-            key=f"q2_back_{index}",
-            use_container_width=False,
-        ):
-            st.session_state.alt_text_phase = "question_1"
-            st.rerun()
-
         _render_image_nav_buttons(index, total, img_key, current, results)
+        _render_abandon_button()
 
+    # -------------------------------------------------------------------------
     # -------------------------------------------------------------------------
     # ENTER TEXT — write the alt text description
     # Per CLAUDE.md: generate a description and ask the faculty member to
@@ -4869,24 +4822,14 @@ def render_image_alt_text():
     # -------------------------------------------------------------------------
     elif phase == "enter_text":
         result   = results.get(img_key, {})
-        severity = result.get("severity", "red")
         existing = result.get("alt_text", "")
 
-        if severity == "red":
-            st.markdown("### 🔴 This image needs a full text description")
-            st.markdown(
-                "Write a description that conveys everything a student would need "
-                "to know from this image — what it shows, why it matters in context, "
-                "and any data or key information it presents. A student who cannot "
-                "see this image should be able to fully understand it from your words."
-            )
-        else:
-            st.markdown("### 🟡 This image needs a brief description")
-            st.markdown(
-                "Write a short description that gives students useful context — "
-                "what the image is and its general relationship to the surrounding "
-                "content. It doesn't need to capture every detail."
-            )
+        st.markdown("### Describe this image")
+        st.markdown(
+            "Write a description that tells students what this image shows and why it "
+            "matters in the context of the document. A student who cannot see the image "
+            "should be able to understand what it conveys from your description."
+        )
 
         new_text = st.text_area(
             "Text description (alt text):",
@@ -4913,11 +4856,14 @@ def render_image_alt_text():
 
         with col2:
             if st.button(
-                "← Back to question",
+                "← Back to classification",
                 use_container_width=True,
                 key=f"alt_back_{index}",
             ):
-                st.session_state.alt_text_phase = "question_2"
+                # Clear the informational classification so question_1 restarts cleanly.
+                results.pop(img_key, None)
+                st.session_state.alt_text_results = results
+                st.session_state.alt_text_phase = "question_1"
                 st.rerun()
 
         _render_image_nav_buttons(index, total, img_key, current, results)
@@ -5816,6 +5762,21 @@ def render_continue_or_stop():
             ):
                 st.session_state.step = "manual_review"
                 st.rerun()
+
+        # Mid-session download checkpoint — goes to choose_format without stopping.
+        # The Abandon button on the download screen returns to issue_list so the
+        # user can continue working after grabbing a copy.
+        st.divider()
+        if st.button(
+            "Download what I have so far",
+            use_container_width=True,
+        ):
+            st.session_state.step = "choose_format"
+            st.rerun()
+        st.caption(
+            "Saves a copy of your progress without stopping. "
+            "Use the Abandon button on the download screen to come back and keep working."
+        )
     else:
         # No issues remaining — go to manual review checklist before download
         st.markdown("You've worked through all the issues — great job!")
@@ -6002,6 +5963,112 @@ def render_manual_review():
             f"**{SEVERITY_LABEL[item['severity']]} — {item['title']}**{status}"
         )
         st.caption(item["check"])
+
+        # Decorative image verification — show actual thumbnails so faculty can
+        # see which images were auto-classified as decorative or removed, and
+        # offer a reinstate button for any removed image they think was wrongly excluded.
+        if item_id == "decorative_images":
+            alt_results = st.session_state.get("alt_text_results", {})
+            alt_images  = st.session_state.get("alt_text_images", [])
+
+            if not alt_images:
+                # No image workflow was run this session — nothing to show.
+                st.caption("No images were processed in this session.")
+            else:
+                REMOVED_TYPES = {"artifact", "background", "edge_artifact"}
+                pdf_source = (
+                    st.session_state.working_pdf_bytes or st.session_state.file_bytes
+                )
+
+                # Partition into decorative vs. removed.
+                decorative_imgs = [
+                    img for img in alt_images
+                    if alt_results.get(img["img_key"], {}).get("type") == "decorative"
+                ]
+                removed_imgs = [
+                    img for img in alt_images
+                    if alt_results.get(img["img_key"], {}).get("type") in REMOVED_TYPES
+                ]
+
+                if decorative_imgs:
+                    st.markdown(
+                        f"**{len(decorative_imgs)} image{'s' if len(decorative_imgs) != 1 else ''} "
+                        "marked as decorative** — these will have empty alt text in the output."
+                    )
+                    # Show thumbnails in a grid of up to 4 columns.
+                    n_cols = min(len(decorative_imgs), 4)
+                    cols = st.columns(n_cols)
+                    for i, img in enumerate(decorative_imgs):
+                        with cols[i % n_cols]:
+                            img_bytes, _ = extract_image_by_source(pdf_source, img)
+                            if img_bytes:
+                                pg = alt_results.get(img["img_key"], {}).get(
+                                    "page", img.get("page", "?")
+                                )
+                                st.image(
+                                    img_bytes,
+                                    caption=f"Page {pg} — Decorative",
+                                    use_container_width=True,
+                                )
+
+                if removed_imgs:
+                    TYPE_LABELS = {
+                        "artifact":      "Scan artifact",
+                        "background":    "Page background",
+                        "edge_artifact": "Edge artifact",
+                    }
+                    st.markdown(
+                        f"**{len(removed_imgs)} image{'s' if len(removed_imgs) != 1 else ''} "
+                        "excluded from the output** (marked as artifacts or backgrounds)."
+                    )
+                    for img in removed_imgs:
+                        img_key = img["img_key"]
+                        kind    = alt_results.get(img_key, {}).get("type", "artifact")
+                        pg      = alt_results.get(img_key, {}).get(
+                            "page", img.get("page", "?")
+                        )
+                        label   = TYPE_LABELS.get(kind, "Removed image")
+
+                        with st.expander(
+                            f"Page {pg} — {label}", expanded=True
+                        ):
+                            img_bytes, _ = extract_image_by_source(pdf_source, img)
+                            col_img, col_btn = st.columns([3, 1])
+                            with col_img:
+                                if img_bytes:
+                                    st.image(img_bytes, width=200)
+                            with col_btn:
+                                if st.button(
+                                    "Reinstate",
+                                    key=f"reinstate_{img_key}",
+                                    help=(
+                                        "Remove the 'excluded' classification and send "
+                                        "this image back through the alt text workflow."
+                                    ),
+                                ):
+                                    # Clear this image's result so the alt text workflow
+                                    # will ask the faculty to reclassify it.
+                                    new_results = dict(alt_results)
+                                    new_results.pop(img_key, None)
+                                    st.session_state.alt_text_results = new_results
+
+                                    # Jump into the alt text workflow at this image.
+                                    for idx, m in enumerate(alt_images):
+                                        if m["img_key"] == img_key:
+                                            st.session_state.alt_text_index = idx
+                                            break
+                                    st.session_state.alt_text_phase      = "question_1"
+                                    # Flag tells the summary confirmation to return here
+                                    # instead of going to continue_or_stop.
+                                    st.session_state.alt_text_return_to  = "manual_review"
+                                    st.session_state.step                = "image_alt_text"
+                                    st.rerun()
+
+                if not decorative_imgs and not removed_imgs:
+                    st.caption(
+                        "All images were classified as informational — "
+                        "nothing was marked decorative or removed."
+                    )
 
         if result is None:
             # Not yet reviewed — show the two response buttons
