@@ -46,6 +46,7 @@ from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
 from docling.document_converter import DocumentConverter  # Docling — ML-powered document structure analysis
 from docling_core.types.doc import DocItemLabel           # Semantic element type labels (heading, list, table, etc.)
 from docx2pdf import convert as docx2pdf_convert          # Converts DOCX → PDF via Microsoft Word (Windows COM)
+import pythoncom                                           # Windows COM initialization — required before docx2pdf in Streamlit threads
 
 
 # ---------------------------------------------------------------------------
@@ -6196,8 +6197,14 @@ def _convert_docx_to_pdf(docx_bytes):
             f.write(docx_bytes)
 
         # docx2pdf drives Word via COM on Windows. Word must be installed.
-        # On Mac/Linux it falls back to LibreOffice if available.
-        docx2pdf_convert(docx_path, pdf_path)
+        # Streamlit callbacks run in non-main threads that have never called
+        # CoInitialize, which causes COM to fail with -2147221008. We initialize
+        # COM explicitly on this thread and release it when done.
+        pythoncom.CoInitialize()
+        try:
+            docx2pdf_convert(docx_path, pdf_path)
+        finally:
+            pythoncom.CoUninitialize()
 
         with open(pdf_path, "rb") as f:
             return f.read()
