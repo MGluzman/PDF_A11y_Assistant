@@ -1,6 +1,6 @@
 # To Do Next — Agentic AI Accessibility Suite
 
-**Last updated:** 2026-05-15 (session 4)
+**Last updated:** 2026-05-18 (session 5)
 
 ---
 
@@ -169,6 +169,40 @@ Branches that use `render_plan_box()` (styled): `untagged_pdf`, `heading_hierarc
 default `else`. Branches with interactive widgets (`missing_lang`, `color_only_cue`,
 `missing_title`) still use `st.info()` / `st.markdown()` — consider migrating those
 too once the layout is finalized.
+
+---
+
+### 14. Split OCR into two paths: Tesseract/EasyOCR fast pass + optional Docling deep pass
+Currently Tesseract is the primary OCR engine and EasyOCR is a user-triggered
+alternative. Both produce raw text that the app reconstructs into structure
+using font-size heuristics.
+
+Proposed two-step pipeline:
+- **Step 1 (fast):** Run Tesseract + EasyOCR on each scanned page, pick the
+  better result per page by quality score. Show the user the result quickly —
+  same flow as today.
+- **Step 2 (optional, user-triggered):** Run Docling's `DocumentConverter` with
+  an OCR pipeline (`TesseractOcrOptions` or `EasyOcrOptions`) on the original
+  scanned PDF. Docling re-does OCR from scratch but also labels structure —
+  headings, paragraphs, lists, tables — in one pass. The resulting DOCX would
+  be significantly better structured without any font-size heuristic guessing.
+
+Key constraint: step 2 is NOT a layer on top of step 1 — Docling processes
+the original image PDF independently. It's a slower, parallel path (~200–400 MB
+model weights, downloaded once and cached).
+
+Good fit for: complex multi-column layouts, documents with tables, documents
+where heading structure matters most. Overkill for simple single-column PDFs.
+
+---
+
+## Notes from Session (2026-05-18)
+- Fixed image alt text workflow cycling: PyMuPDF and Docling both detected the
+  same images for digital PDFs, creating duplicate entries in `alt_text_images`.
+  Fix: skip Docling PICTURE items on pages where PyMuPDF already found XObjects.
+- Fixed PDF conversion failure: `docx2pdf` COM call now wraps
+  `pythoncom.CoInitialize()` / `CoUninitialize()` to handle Streamlit's
+  non-main threads (-2147221008 error).
 
 ---
 
