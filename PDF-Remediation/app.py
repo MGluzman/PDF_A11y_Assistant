@@ -4847,8 +4847,23 @@ def render_image_alt_text():
                 use_container_width=True,
                 key=f"alt_save_{index}",
             ):
-                if new_text.strip():
-                    results[img_key]["alt_text"] = new_text.strip()
+                # Read from widget AND session_state as a fallback — in some
+                # Streamlit versions the widget return value can be stale on the
+                # first rerun after a phase transition.
+                widget_key = f"alt_input_{index}"
+                text = new_text.strip() or st.session_state.get(widget_key, "").strip()
+                if text:
+                    # Ensure the result entry exists (defensive — should have been
+                    # set by the question_1 handler, but create it if missing).
+                    if img_key not in results:
+                        results[img_key] = {
+                            "type": "informational",
+                            "severity": "yellow",
+                            "alt_text": text,
+                            "page": current["page"],
+                        }
+                    else:
+                        results[img_key]["alt_text"] = text
                     st.session_state.alt_text_results = results
                     _advance_alt_text_image()
                 else:
