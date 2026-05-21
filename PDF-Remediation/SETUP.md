@@ -41,7 +41,7 @@ The Python library (`pytesseract`) is just a wrapper — you need this binary to
 1. Open **Command Prompt** (search "cmd" in Start menu)
 2. Navigate to this folder:
    ```
-   cd "C:\Users\mgluz\Desktop\Agentic AI\PDF-Remediation"
+   cd "C:\path\to\Agentic-AI\PDF-Remediation"
    ```
 3. Double-click **`setup.bat`** OR type in Command Prompt:
    ```
