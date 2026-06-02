@@ -30,6 +30,27 @@ charts. Particularly relevant for data-heavy course materials.
 
 ## Improvements to Existing Tools
 
+### PDF Assistant — Text/Background Contrast Check (WCAG SC 1.4.3)
+Automated detection of text that fails the minimum 4.5:1 contrast ratio (3:1 for large text 18pt+).
+
+**Next implementation — Fill path analysis (preferred):**
+Extract filled rectangles drawn behind text spans using PyMuPDF's path/drawing data.
+Compare the fill color against the span's text color using the WCAG relative luminance
+formula. Faster than pixel sampling and sufficient for the most common case: colored
+text boxes, highlighted backgrounds, and branded header/footer bands.
+Limitation: misses image backgrounds and gradients.
+
+**Wishlist — Pixel sampling:**
+Render each page to an image and sample the background pixels directly behind each
+text span's bounding box (inset slightly to avoid sampling the text itself).
+More reliable across all background types including images and gradients, but slower.
+Would replace fill path analysis as the detection method when performance allows.
+
+**Fix path for both:** Flag failing spans by page, show faculty the contrast ratio
+and the WCAG threshold, and direct them to correct colors in the DOCX export.
+
+---
+
 ### PDF Assistant — "Bring Your Own Claude API" (optional LLM OCR upgrade)
 After the free-tier OCR (Tesseract + EasyOCR fallback) runs, offer faculty
 with their own Anthropic API key the option to re-process the scanned pages
