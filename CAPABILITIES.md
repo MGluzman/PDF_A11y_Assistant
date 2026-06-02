@@ -1,6 +1,6 @@
 # PDF Accessibility Assistant — Current Capabilities
 
-**Last updated:** 2026-04-27
+**Last updated:** 2026-06-02
 
 ---
 
@@ -31,7 +31,7 @@ plain language, and delivers a remediated file ready to share with students.
 - Exports a readable version as Word or PDF with `_readable` appended to the filename
 
 ### Accessibility Issue Detection
-The app automatically checks for 7 categories of accessibility problems:
+The app automatically checks for 13 categories of accessibility problems:
 
 | Issue | Severity | What it means |
 |-------|----------|---------------|
@@ -40,8 +40,15 @@ The app automatically checks for 7 categories of accessibility problems:
 | Images missing text descriptions | 🔴 Critical | Students who cannot see the image get no information about it |
 | Text too small to read comfortably | 🔴 Critical (>25%) / 🟡 Moderate (1–25%) | Font size below 9pt creates barriers for low-vision readers |
 | Missing or broken heading structure | 🟡 Moderate | Screen reader users cannot navigate or understand the document's structure |
+| Incorrect reading order | 🟡 Moderate | Content is stored out of visual sequence, confusing screen reader users |
 | Missing document language tag | 🟡 Moderate | Screen readers may read content in the wrong language or pronunciation |
+| Color used as the only cue for meaning | 🟡 Moderate | Users who are color blind or printing in black and white will miss the meaning |
+| Missing document title in metadata | 🟢 Minor | Screen readers announce the title when a file opens; a missing title is a gap |
 | Missing navigation bookmarks | 🟢 Minor | Long documents without bookmarks require everyone to scroll to find content |
+| Inconsistent list tagging | 🟢 Minor | Visual lists not marked up as lists; screen readers won't announce item count |
+| Line spacing too tight | 🟢 Minor | Insufficient line height creates barriers for users with dyslexia or low vision |
+| Letter spacing too tight | 🟢 Minor | Compressed tracking reduces legibility, especially for users with dyslexia |
+| Excessive use of text colors | 🟢 Minor | Too many text colors create visual noise without conveying meaningful information |
 
 ### Issue Fixes
 Each detected issue has a guided fix workflow. Faculty confirm every change before it is saved — nothing is applied automatically without approval.
@@ -53,8 +60,15 @@ Each detected issue has a guided fix workflow. Faculty confirm every change befo
 | Missing alt text | Per-image workflow: classify each image, write or approve a description |
 | Font size too small | Noted; minimum font size enforced on Word export |
 | Heading hierarchy | Noted; correct heading structure applied on Word export |
+| Reading order | Noted; correct content sequence applied on Word export |
 | Missing language tag | Language auto-detected; faculty can override via 17-language dropdown |
+| Color as only cue | Flagged for manual review; specific guidance provided |
+| Missing document title | Faculty enters a title; app applies it to document metadata |
 | Missing bookmarks | Bookmarks generated from heading structure; faculty previews list before applying |
+| Inconsistent list tagging | Noted; proper list markup applied on Word export |
+| Line spacing too tight | Noted; 1.5× line spacing applied on Word export |
+| Letter spacing too tight | Noted; default tracking normalized on Word export |
+| Excessive text colors | Noted; color variety reduced to a small intentional set on Word export |
 
 ### Image Alt Text Workflow
 When a document has images without text descriptions, the app runs a dedicated workflow:
@@ -64,26 +78,9 @@ When a document has images without text descriptions, the app runs a dedicated w
 - If informational: is it critical or supplementary to understanding?
 - Faculty writes or edits the description; app saves it to the output file
 
-### Output
-- Exports as **Word (.docx)** — structured with heading styles, ready for further editing or re-export as a tagged PDF
-- Exports as **PDF** — text-based, ready to share
-- Filename format: `original_name_edited.docx` / `original_name_edited.pdf`
-
----
-
-## What It Does Not Yet Do
-
-The following are planned but not yet implemented:
-
-- **Reading order verification** — detecting when content is stored out of visual sequence
-- **Excessive text colors** — flagging documents that use too many different text colors
-- **Inconsistent list tagging** — detecting visual lists that aren't marked up as lists
-- **Line spacing** — detecting text that is too tightly spaced for comfortable reading
-- **Manual review checklist** — a guided screen for issues that require human judgment (see below)
-
-### Issues That Require Human Review
-Some accessibility problems cannot be detected automatically. A future screen will
-prompt faculty to check these manually:
+### Manual Review Checklist
+After all auto-detected issues are resolved, the app presents a guided checklist
+for accessibility problems that cannot be detected algorithmically:
 
 | Issue | Severity | Why it needs a human |
 |-------|----------|----------------------|
@@ -95,6 +92,12 @@ prompt faculty to check these manually:
 | Table structure correctness | 🟡 Moderate | Header cell semantics must be verified visually |
 | Abbreviations spelled out on first use | 🟢 Minor | Requires reading comprehension, not pattern matching |
 | Non-English passages | 🟢 Minor | Requires identifying language of specific text segments |
+| Decorative image verification | 🟢 Minor | Confirm no content image was accidentally auto-classified as decorative |
+
+### Output
+- Exports as **Word (.docx)** — structured with heading styles, ready for further editing or re-export as a tagged PDF
+- Exports as **PDF** — text-based, ready to share
+- Filename format: `original_name_edited.docx` / `original_name_edited.pdf`
 
 ---
 
