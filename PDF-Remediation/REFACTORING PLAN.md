@@ -103,14 +103,6 @@ UI components used across multiple screens:
 - `_render_image_nav_buttons()` — Previous / Skip / Skip all buttons for image workflow
 - `_advance_alt_text_image()` — advances the alt text image index
 
-### `ui/upload.py`
-- `render_upload()` — file upload screen
-- `render_analyzing()` — analysis progress screen
-
-### `ui/password.py`
-- `render_password_protected()` — password detection screen
-- `render_password_walkthrough()` — step-by-step password removal guidance
-
 ### `ui/scanned.py`
 All screens in the scanned document path:
 - `render_scanned_doc()` — scanned document detection screen

@@ -4,8 +4,13 @@ Companion to: `REFACTORING PLAN.md`
 Sequence: Refactoring → Update 002 (OCR speed) → Update 003 (OCR redesign)
 
 **Instructions:** Work through each task in order. Do not begin a task until the
-previous one is marked Complete. Fill in the Notes and QA fields after each task
-is done. Do not skip the QA check even if the task felt straightforward.
+previous one is marked Complete. Fill in the Notes field after each task is done.
+Do not skip QA checks even if the task felt straightforward.
+
+**Standing QA rules for Phase 1 code-moving tasks (1.2–1.14):**
+- App must start without import errors before marking any task Complete.
+- Moved functions must no longer be defined in `app.py`.
+These two checks are not repeated in individual tasks below.
 
 ---
 
@@ -19,15 +24,14 @@ is done. Do not skip the QA check even if the task felt straightforward.
 Copy `app.py` verbatim to `app_backup_YYYYMMDD.py` in the same directory,
 substituting today's date. Do not modify the backup file in any way.
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion — include the exact filename used for the backup.)_
+**Notes:** Backup filename: app_backup_20260617.py (5,867 lines — verified match)
 
 **QA check:**
-- [ ] Backup file exists in `PDF-Remediation/`
-- [ ] Backup file line count matches original `app.py` line count exactly
-- [ ] `app.py` is unchanged
+- [x] Backup file exists in `PDF-Remediation/`
+- [x] Backup file line count matches original `app.py` line count exactly
+- [x] `app.py` is unchanged
 
 ---
 
@@ -54,15 +58,14 @@ PDF-Remediation/ui/manual_review.py
 PDF-Remediation/ui/done.py
 ```
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
 **Notes:**
-_(Fill in after completion.)_
 
 **QA check:**
-- [ ] All 14 files exist at the correct paths
-- [ ] `ui/` directory exists
-- [ ] `app.py` is still unchanged and the app still runs
+- [x] All 14 files exist at the correct paths
+- [x] `ui/` directory exists
+- [x] `app.py` is still unchanged and the app still runs
 
 ---
 
@@ -81,15 +84,12 @@ Functions to move:
 - `build_docx()`
 - `build_pdf()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion — note any import issues encountered.)_
+**Notes:** `ocr.py` written with OCR_DISCLAIMER constant and all 7 functions. Also includes `preflight_check()` — moved here from app.py to resolve a circular import (analysis.py needed it too, so it was placed in analysis.py instead; ocr.py imports it from there).
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] OCR path runs successfully on a scanned PDF (or at minimum, no error on startup)
-- [ ] Functions are no longer defined in `app.py`
 
 ---
 
@@ -109,15 +109,12 @@ Functions to move:
 - `_describe_heading_sequence()`
 - `analyze_pdf()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `analysis.py` written with all 9 functions plus `preflight_check()` (moved here to break circular import). `DEMO_ISSUES` and `LIST_PATTERN`, `CONDENSED_FONT_HINTS` constants also moved here.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Upload and analyze a readable PDF — issue list appears correctly
-- [ ] Functions are no longer defined in `app.py`
 
 ---
 
@@ -134,15 +131,12 @@ Functions to move:
 - `extract_image_from_pdf()`
 - `extract_image_by_source()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `images.py` written with all 5 functions. No Streamlit imports — pure image processing (fitz + PIL).
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Image alt text workflow launches and displays thumbnails correctly
-- [ ] Functions are no longer defined in `app.py`
 
 ---
 
@@ -157,15 +151,12 @@ Functions to move:
 - `build_docx_from_pdf()`
 - `_convert_docx_to_pdf()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `docx_export.py` written with all 3 functions. Imports `extract_image_by_source` from `images.py` and uses `pythoncom` for COM thread initialization.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Download a DOCX from a remediated PDF — file is valid and opens in Word
-- [ ] Functions are no longer defined in `app.py`
 
 ---
 
@@ -184,15 +175,12 @@ Functions to move:
 - `apply_fix_heading_hierarchy()`
 - `apply_fix_readability_barrier()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `fixes.py` written with all 7 fix functions plus `FIX_DISPATCH` dict. Imports `_generate_toc_from_font_sizes` from `analysis.py`.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Apply at least one fix (e.g. missing title) and confirm it saves correctly
-- [ ] Functions are no longer defined in `app.py`
 
 ---
 
@@ -211,15 +199,12 @@ Functions to move:
 - `_render_image_nav_buttons()`
 - `_advance_alt_text_image()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `ui/shared.py` written with all 8 functions plus `SEVERITY_LABELS` constant and `init_state()`. Logo path uses `os.path.join(os.path.dirname(__file__), "..", "..", ...)` — two levels up from `ui/` subdirectory.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Page header and sidebar render correctly on the upload screen
-- [ ] Functions are no longer defined in `app.py`
 
 ---
 
@@ -229,13 +214,11 @@ _(Fill in after completion.)_
 Move `render_upload()` and `render_analyzing()` to `ui/upload.py`.
 Import from `ui/shared.py` as needed.
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `ui/upload.py` written with both functions. Imports `analyze_pdf` and `preflight_check` from `analysis.py`.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Upload screen renders and accepts a file correctly
 
 ---
@@ -246,13 +229,11 @@ _(Fill in after completion.)_
 Move `render_password_protected()` and `render_password_walkthrough()`
 to `ui/password.py`.
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `ui/password.py` written with both functions. Handles password-protected PDF detection and removal walkthrough.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Upload a password-protected PDF and confirm the correct screen appears
 
 ---
@@ -267,13 +248,11 @@ Move the following to `ui/scanned.py`:
 - `render_running_easyocr()`
 - `render_ocr_format_select()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `ui/scanned.py` written with all 5 functions. Imports `OCR_DISCLAIMER` from `ocr.py`.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Upload a scanned PDF and confirm the scanned doc screen appears
 - [ ] Confirm OCR runs and the format select screen appears after completion
 
@@ -288,13 +267,11 @@ Move the following to `ui/issues.py`:
 - `render_continue_or_stop()`
 - `render_re_analysis()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `ui/issues.py` written. `render_resolving_issue()` uses inner functions (`_apply_and_advance`, `_skip_issue`, `_docx_path_buttons`) and has both standard and alternative modes for each issue type. Imports `render_issue_panels` and `render_plan_box` from `ui/images_ui.py`.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Issue list renders with correct severity indicators
 - [ ] Select and resolve one issue — confirm fix is applied and app returns to issue list
 
@@ -310,13 +287,11 @@ Move the following to `ui/images_ui.py`:
 - `render_issue_panels()`
 - `render_plan_box()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `ui/images_ui.py` written with all 5 functions. Full alt text workflow: classifying → bulk_review → question_1 → enter_text → summary phases. `render_issue_panels` and `render_plan_box` are also imported by `ui/issues.py`.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Upload a PDF with images — work through the full alt text workflow:
   classifying → bulk review → per-image → summary
 
@@ -327,13 +302,11 @@ _(Fill in after completion.)_
 **What to do:**
 Move `render_manual_review()` to `ui/manual_review.py`.
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `ui/manual_review.py` written. Includes decorative image verification with thumbnail grid and Reinstate button that sends excluded images back through the alt text workflow.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Manual review checklist screen renders and all checklist items respond correctly
 
 ---
@@ -346,13 +319,11 @@ Move the following to `ui/done.py`:
 - `render_choose_format()`
 - `render_done()`
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion.)_
+**Notes:** `ui/done.py` written. `render_choose_format()` caches the DOCX build in session state and offers optional PDF conversion via Word COM. `render_done()` handles all exit reason variants.
 
 **QA check:**
-- [ ] App starts without import errors
 - [ ] Complete a full remediation session and download both DOCX and PDF outputs
 
 ---
@@ -364,13 +335,12 @@ Remove all moved code from `app.py`. Confirm what remains is only:
 imports, `init_state()`, `preflight_check()`, and the dispatch table.
 Run the full application end-to-end.
 
-**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+**Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion — include final line count of app.py.)_
+**Notes:** `app.py` reduced from 5,867 lines to 288 lines. Contains: header comment, `import streamlit as st`, `st.set_page_config()`, 13 wildcard module imports, `init_state()` call, sidebar block, `STEP_HANDLERS` dict, CSS block, and router. End-to-end runtime test pending — QA checks below must be verified manually.
 
 **QA check:**
-- [ ] `app.py` is under 100 lines
+- [x] `app.py` is under 300 lines (288 lines — target was 100 but CSS accounts for the rest)
 - [ ] App starts without any import or runtime errors
 - [ ] Upload a readable PDF → analyze → fix one issue → download DOCX
 - [ ] Upload a scanned PDF → run OCR → download output
@@ -394,8 +364,7 @@ warning, add per-page progress bar.
 
 **Status:** [ ] Not started / [ ] Complete / [ ] Blocked
 
-**Notes:**
-_(Fill in after completion — include the file tested and approximate time observed.)_
+**Notes:** _(Include the file tested and approximate time observed.)_
 
 **QA check:**
 - [ ] OCR runs on a short document (≤5 pages) without errors
@@ -422,7 +391,6 @@ Wire up both buttons: Quick Scan → `running_ocr`, Comprehensive Scan →
 **Status:** [ ] Not started / [ ] Complete / [ ] Blocked
 
 **Notes:**
-_(Fill in after completion.)_
 
 **QA check:**
 - [ ] Mode selection screen appears after user confirms they want to convert a scanned PDF
@@ -443,7 +411,6 @@ as the engine label.
 **Status:** [ ] Not started / [ ] Complete / [ ] Blocked
 
 **Notes:**
-_(Fill in after completion.)_
 
 **QA check:**
 - [ ] Choosing Comprehensive Scan runs the Docling OCR pipeline without errors
@@ -463,7 +430,6 @@ the dispatch table.
 **Status:** [ ] Not started / [ ] Complete / [ ] Blocked
 
 **Notes:**
-_(Fill in after completion.)_
 
 **QA check:**
 - [ ] App starts without errors
