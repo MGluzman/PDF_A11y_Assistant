@@ -1,11 +1,15 @@
-# Change Control — PDF Assistant Refactoring
+# Change Control — PDF Assistant
 
-Companion to: `REFACTORING PLAN.md`
-Sequence: Refactoring → Update 002 (OCR speed) → Update 003 (OCR redesign)
+Companion to: `REFACTORING PLAN.md`, `UPDATES PLAN.md`
+Sequence: Phase 1 Refactoring → Phase 2 Bugfixes → Phase 3 OCR Improvements
 
 **Instructions:** Work through each task in order. Do not begin a task until the
 previous one is marked Complete. Fill in the Notes field after each task is done.
 Do not skip QA checks even if the task felt straightforward.
+
+**Tested by Claude** records whether Claude ran the `/verify` skill after this task
+and what the result was. Possible values: `Pass`, `Fail — [brief reason]`, `Not run`.
+This field is filled in by Claude during implementation, not by the faculty member.
 
 **Standing QA rules for Phase 1 code-moving tasks (1.2–1.14):**
 - App must start without import errors before marking any task Complete.
@@ -27,6 +31,8 @@ substituting today's date. Do not modify the backup file in any way.
 **Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
 **Notes:** Backup filename: app_backup_20260617.py (5,867 lines — verified match)
+
+**Tested by Claude:** Not run — task completed before this field was introduced
 
 **QA check:**
 - [x] Backup file exists in `PDF-Remediation/`
@@ -62,6 +68,8 @@ PDF-Remediation/ui/done.py
 
 **Notes:**
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [x] All 14 files exist at the correct paths
 - [x] `ui/` directory exists
@@ -88,6 +96,8 @@ Functions to move:
 
 **Notes:** `ocr.py` written with OCR_DISCLAIMER constant and all 7 functions. Also includes `preflight_check()` — moved here from app.py to resolve a circular import (analysis.py needed it too, so it was placed in analysis.py instead; ocr.py imports it from there).
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [ ] OCR path runs successfully on a scanned PDF (or at minimum, no error on startup)
 
@@ -113,6 +123,8 @@ Functions to move:
 
 **Notes:** `analysis.py` written with all 9 functions plus `preflight_check()` (moved here to break circular import). `DEMO_ISSUES` and `LIST_PATTERN`, `CONDENSED_FONT_HINTS` constants also moved here.
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [ ] Upload and analyze a readable PDF — issue list appears correctly
 
@@ -135,6 +147,8 @@ Functions to move:
 
 **Notes:** `images.py` written with all 5 functions. No Streamlit imports — pure image processing (fitz + PIL).
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [ ] Image alt text workflow launches and displays thumbnails correctly
 
@@ -154,6 +168,8 @@ Functions to move:
 **Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
 **Notes:** `docx_export.py` written with all 3 functions. Imports `extract_image_by_source` from `images.py` and uses `pythoncom` for COM thread initialization.
+
+**Tested by Claude:** Not run — task completed before this field was introduced
 
 **QA check:**
 - [ ] Download a DOCX from a remediated PDF — file is valid and opens in Word
@@ -179,6 +195,8 @@ Functions to move:
 
 **Notes:** `fixes.py` written with all 7 fix functions plus `FIX_DISPATCH` dict. Imports `_generate_toc_from_font_sizes` from `analysis.py`.
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [ ] Apply at least one fix (e.g. missing title) and confirm it saves correctly
 
@@ -203,6 +221,8 @@ Functions to move:
 
 **Notes:** `ui/shared.py` written with all 8 functions plus `SEVERITY_LABELS` constant and `init_state()`. Logo path uses `os.path.join(os.path.dirname(__file__), "..", "..", ...)` — two levels up from `ui/` subdirectory.
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [ ] Page header and sidebar render correctly on the upload screen
 
@@ -218,6 +238,8 @@ Import from `ui/shared.py` as needed.
 
 **Notes:** `ui/upload.py` written with both functions. Imports `analyze_pdf` and `preflight_check` from `analysis.py`.
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [ ] Upload screen renders and accepts a file correctly
 
@@ -232,6 +254,8 @@ to `ui/password.py`.
 **Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
 **Notes:** `ui/password.py` written with both functions. Handles password-protected PDF detection and removal walkthrough.
+
+**Tested by Claude:** Not run — task completed before this field was introduced
 
 **QA check:**
 - [ ] Upload a password-protected PDF and confirm the correct screen appears
@@ -252,6 +276,8 @@ Move the following to `ui/scanned.py`:
 
 **Notes:** `ui/scanned.py` written with all 5 functions. Imports `OCR_DISCLAIMER` from `ocr.py`.
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [ ] Upload a scanned PDF and confirm the scanned doc screen appears
 - [ ] Confirm OCR runs and the format select screen appears after completion
@@ -270,6 +296,8 @@ Move the following to `ui/issues.py`:
 **Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
 **Notes:** `ui/issues.py` written. `render_resolving_issue()` uses inner functions (`_apply_and_advance`, `_skip_issue`, `_docx_path_buttons`) and has both standard and alternative modes for each issue type. Imports `render_issue_panels` and `render_plan_box` from `ui/images_ui.py`.
+
+**Tested by Claude:** Not run — task completed before this field was introduced
 
 **QA check:**
 - [ ] Issue list renders with correct severity indicators
@@ -291,6 +319,8 @@ Move the following to `ui/images_ui.py`:
 
 **Notes:** `ui/images_ui.py` written with all 5 functions. Full alt text workflow: classifying → bulk_review → question_1 → enter_text → summary phases. `render_issue_panels` and `render_plan_box` are also imported by `ui/issues.py`.
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [ ] Upload a PDF with images — work through the full alt text workflow:
   classifying → bulk review → per-image → summary
@@ -305,6 +335,8 @@ Move `render_manual_review()` to `ui/manual_review.py`.
 **Status:** [ ] Not started / [x] Complete / [ ] Blocked
 
 **Notes:** `ui/manual_review.py` written. Includes decorative image verification with thumbnail grid and Reinstate button that sends excluded images back through the alt text workflow.
+
+**Tested by Claude:** Not run — task completed before this field was introduced
 
 **QA check:**
 - [ ] Manual review checklist screen renders and all checklist items respond correctly
@@ -323,6 +355,8 @@ Move the following to `ui/done.py`:
 
 **Notes:** `ui/done.py` written. `render_choose_format()` caches the DOCX build in session state and offers optional PDF conversion via Word COM. `render_done()` handles all exit reason variants.
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [ ] Complete a full remediation session and download both DOCX and PDF outputs
 
@@ -339,6 +373,8 @@ Run the full application end-to-end.
 
 **Notes:** `app.py` reduced from 5,867 lines to 288 lines. Contains: header comment, `import streamlit as st`, `st.set_page_config()`, 13 wildcard module imports, `init_state()` call, sidebar block, `STEP_HANDLERS` dict, CSS block, and router. End-to-end runtime test pending — QA checks below must be verified manually.
 
+**Tested by Claude:** Not run — task completed before this field was introduced
+
 **QA check:**
 - [x] `app.py` is under 300 lines (288 lines — target was 100 but CSS accounts for the rest)
 - [ ] App starts without any import or runtime errors
@@ -349,92 +385,193 @@ Run the full application end-to-end.
 
 ---
 
-## PHASE 2 — Update 002: OCR Speed Fixes
+## PHASE 2 — Bugfixes and Analysis Improvements
 
-_(See `ERRORS & UPDATES.md` Update 002 for full details and the paste-ready prompt.)_
+_(See `UPDATES PLAN.md` Updates 1 and 2, and `ERRORS & UPDATES.md` Error 001 and Update 004.)_
 
 ---
 
-### Task 2.1 — Apply OCR speed fixes
+### Task 2.1 — Safe image conversion (RGB)
 
 **What to do:**
-Apply all six changes described in Update 002: lower DPI to 150, parallelize
-Tesseract, parallelize EasyOCR, limit OSD to first 2 pages, add large-file
-warning, add per-page progress bar.
+Add a `safe_image_bytes()` helper to `images.py` that converts any non-RGB/RGBA
+image to RGB before display. Replace all 7 `st.image(img_bytes, ...)` calls in
+`ui/images_ui.py` with `st.image(safe_image_bytes(img_bytes), ...)`.
+
+See UPDATES PLAN.md Update 1 for the exact function body and all 7 call sites.
 
 **Status:** [ ] Not started / [ ] Complete / [ ] Blocked
 
-**Notes:** _(Include the file tested and approximate time observed.)_
+**Notes:**
+
+**Tested by Claude:** Not run
 
 **QA check:**
-- [ ] OCR runs on a short document (≤5 pages) without errors
-- [ ] OCR runs on a long document (>15 pages) — large-file warning appears
-- [ ] Progress bar advances page by page during OCR
+- [ ] App starts without import errors
+- [ ] Upload a PDF with images — bulk review screen displays thumbnails without crashing
+- [ ] Per-image screens (page context view and extracted image) display correctly
+- [ ] Test on a PDF with CMYK or grayscale images if available
+
+---
+
+### Task 2.2 — Bookmarks check false positive fix
+
+**What to do:**
+In `analysis.py`, move the `is_tagged` pikepdf check before the bookmarks check.
+Call `_extract_heading_sequence()` once and store the result. Update the bookmarks
+condition to flag the issue only when both `get_toc()` is empty AND the document
+has no heading tags in the StructTreeRoot.
+
+See UPDATES PLAN.md Update 2 for the exact condition and comment wording.
+
+**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+
+**Notes:**
+
+**Tested by Claude:** Not run
+
+**QA check:**
+- [ ] App starts without import errors
+- [ ] Upload the PDF that previously triggered the false positive — bookmarks issue
+  no longer appears
+- [ ] Upload a PDF with no bookmarks AND no tagged headings — bookmarks issue
+  still appears correctly
+- [ ] Heading hierarchy check still works correctly (no double call to
+  `_extract_heading_sequence`)
+
+---
+
+## PHASE 3 — OCR Improvements
+
+_(See `UPDATES PLAN.md` Updates 3, 4, and 5, and `ERRORS & UPDATES.md` Updates 002 and 003.)_
+
+---
+
+### Task 3.1 — Large file warning
+
+**What to do:**
+In `render_scanned_doc()` in `ui/scanned.py`, add a page count check before the
+OCR confirmation buttons. If the document has more than 15 pages, display an
+`st.warning()` with an estimated processing time.
+
+See UPDATES PLAN.md Update 3 for the exact warning message.
+
+**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+
+**Notes:**
+
+**Tested by Claude:** Not run
+
+**QA check:**
+- [ ] App starts without import errors
+- [ ] Upload a scanned PDF with more than 15 pages — warning appears before the
+  confirmation buttons
+- [ ] Upload a scanned PDF with 15 or fewer pages — no warning appears
+- [ ] Warning does not block the user from proceeding
+
+---
+
+### Task 3.2 — OCR speed improvements (Tesseract)
+
+**What to do:**
+In `ocr.py`, make the following changes:
+1. Lower render DPI from 300 to 150 in `preprocess_pages()`
+2. Limit OSD to first 2 pages, apply result globally
+3. Rewrite `run_ocr()` to use `ThreadPoolExecutor` with `max_workers=min(4, os.cpu_count() or 1)`
+4. Add optional `progress_callback` parameter to `run_ocr()`
+
+In `ui/scanned.py`, add an `st.progress()` bar to `render_running_ocr()` that
+advances page by page via the callback.
+
+See UPDATES PLAN.md Update 4 for full details.
+
+**Status:** [ ] Not started / [ ] Complete / [ ] Blocked
+
+**Notes:**
+
+**Tested by Claude:** Not run
+
+**QA check:**
+- [ ] App starts without import errors
+- [ ] OCR runs on a short document (≤5 pages) — output is correct and in page order
+- [ ] OCR runs on a longer document — progress bar advances during processing
 - [ ] Output text quality is comparable to pre-fix results
-- [ ] EasyOCR path also completes without errors
+- [ ] No regression on documents that previously worked
 
 ---
 
-## PHASE 3 — Update 003: OCR Mode Selection (Fast vs. Comprehensive)
-
-_(See `ERRORS & UPDATES.md` Update 003 for full details and the paste-ready prompt.)_
-
----
-
-### Task 3.1 — Add OCR mode selection screen
+### Task 3.3 — OCR mode selection screen
 
 **What to do:**
-Add the `render_ocr_mode_select()` function and the `"ocr_mode_select"` step.
-Wire up both buttons: Quick Scan → `running_ocr`, Comprehensive Scan →
-`running_docling_ocr`.
+Add `render_ocr_mode_select()` to `ui/scanned.py` with two buttons:
+Quick Scan (→ `running_ocr`) and Comprehensive Scan (→ `running_docling_ocr`).
+In `render_scanned_doc()`, change the confirmation button to route to
+`"ocr_mode_select"` instead of `"running_ocr"`. Register the new step in
+the dispatch table in `app.py`.
+
+See UPDATES PLAN.md Update 5 Step 3 and Step 4 for exact button labels and descriptions.
 
 **Status:** [ ] Not started / [ ] Complete / [ ] Blocked
 
 **Notes:**
 
+**Tested by Claude:** Not run
+
 **QA check:**
-- [ ] Mode selection screen appears after user confirms they want to convert a scanned PDF
+- [ ] App starts without import errors
+- [ ] Upload a scanned PDF → confirm OCR → mode selection screen appears
 - [ ] Both buttons are present with correct labels and descriptions
-- [ ] Quick Scan button routes to the existing Tesseract OCR screen
-- [ ] Comprehensive Scan button routes to the new Docling OCR screen
+- [ ] Quick Scan button routes to the Tesseract OCR screen
+- [ ] Comprehensive Scan button routes to the new Docling OCR screen (even if
+  Docling OCR screen is not yet built — a placeholder step is acceptable here)
 
 ---
 
-### Task 3.2 — Add Docling OCR path
+### Task 3.4 — Docling OCR path
 
 **What to do:**
-Add `render_running_docling_ocr()` and update `_run_docling()` to accept
-`do_ocr=True`. Wire up the new screen in the dispatch table. Update
-`render_ocr_format_select()` to display "Docling (comprehensive scan)"
-as the engine label.
+Update `_run_docling()` in `analysis.py` to accept an optional `do_ocr=False`
+parameter. Add `render_running_docling_ocr()` to `ui/scanned.py`. Register
+`"running_docling_ocr"` in the dispatch table in `app.py`. Update
+`render_ocr_format_select()` to display "Docling (comprehensive scan)" when
+`ocr_engine_used == "docling"`.
+
+See UPDATES PLAN.md Update 5 Steps 1, 2, and 6 for full details.
 
 **Status:** [ ] Not started / [ ] Complete / [ ] Blocked
 
 **Notes:**
 
+**Tested by Claude:** Not run
+
 **QA check:**
+- [ ] App starts without import errors
 - [ ] Choosing Comprehensive Scan runs the Docling OCR pipeline without errors
 - [ ] Spinner message is shown during processing
-- [ ] Output DOCX opens correctly and layout is preserved
+- [ ] Output DOCX opens correctly and content is readable
 - [ ] Engine label on the format select screen reads "Docling (comprehensive scan)"
 
 ---
 
-### Task 3.3 — Remove EasyOCR fallback path
+### Task 3.5 — Remove EasyOCR fallback path
 
 **What to do:**
-Remove `render_running_easyocr()`, remove the EasyOCR upgrade offer from
-`render_ocr_format_select()`, and remove the `"running_easyocr"` entry from
-the dispatch table.
+Remove `render_running_easyocr()` from `ui/scanned.py`. Remove the EasyOCR
+upgrade offer from `render_ocr_format_select()`. Remove `"running_easyocr"` from
+the dispatch table in `app.py`. Remove or comment out `run_easyocr()` in `ocr.py`.
+
+See UPDATES PLAN.md Update 5 Step 5 for details.
 
 **Status:** [ ] Not started / [ ] Complete / [ ] Blocked
 
 **Notes:**
 
-**QA check:**
-- [ ] App starts without errors
-- [ ] No reference to EasyOCR upgrade offer appears anywhere in the OCR flow
-- [ ] `render_running_easyocr` is no longer defined anywhere in the codebase
-- [ ] Full OCR flow (both Quick and Comprehensive paths) runs end-to-end without errors
+**Tested by Claude:** Not run
 
----
+**QA check:**
+- [ ] App starts without import errors
+- [ ] No reference to EasyOCR upgrade offer appears anywhere in the OCR flow
+- [ ] `render_running_easyocr` is no longer reachable from any screen
+- [ ] Full OCR flow — both Quick Scan and Comprehensive Scan — runs end-to-end
+  without errors
+- [ ] No regressions on the readable PDF path (analysis, issue list, fixes)
