@@ -185,4 +185,52 @@ Uses Docling's full document understanding pipeline, which analyzes the page str
 
 ---
 
+## Update 004 — Bookmarks Check: False Positives Against Acrobat-Verified Documents
+
+**Date discovered:** 2026-06-24
+**Origin:** Testing with a PDF that passed Adobe Acrobat's accessibility checker
+**Status:** Documented — fix ready to apply
+
+---
+
+### What was observed
+
+A PDF that passed Adobe Acrobat's accessibility checker (Bookmarks and navigation items verified) was still flagged by the app for "Missing bookmarks / navigation."
+
+---
+
+### Why it happens
+
+The app and Adobe Acrobat check for navigation using two different PDF mechanisms:
+
+- **The app** calls PyMuPDF's `doc.get_toc()`, which reads the PDF's `/Outlines` object — the explicit bookmark tree visible in a PDF viewer's navigation panel. If that object is absent or empty, the app flags the issue.
+
+- **Adobe Acrobat** considers a document navigable if it has heading tags in the **StructTreeRoot** (the tag tree). Tagged headings let screen reader users jump between sections even without an explicit bookmark list.
+
+A document can have a fully tagged heading structure — satisfying Acrobat's check — without having an `/Outlines` bookmark tree. In that case the app produces a false positive.
+
+This is not a WCAG version issue. The relevant success criterion (WCAG 2.4.5 — Multiple Ways) is identical in WCAG 2.1 and 2.2. The discrepancy is purely about how each tool operationalizes the same criterion.
+
+---
+
+### The fix
+
+Change the bookmarks check from a single condition to an either-or:
+
+> Flag "Missing bookmarks / navigation" only if the document has **neither** an `/Outlines` bookmark tree **nor** heading tags in the StructTreeRoot.
+
+Either one gives users a navigation path and satisfies WCAG 2.4.5. Only the absence of both warrants flagging the issue.
+
+**Implementation note:** `is_tagged` and `heading_levels` are already computed in `analyze_pdf()` — the bookmarks check just needs to run after those values are available, and use them in the condition.
+
+---
+
+### How to fix it
+
+**Paste the following prompt into Claude to apply the fix:**
+
+> In `PDF-Remediation/analysis.py`, update the bookmarks check in `analyze_pdf()` so it uses an either-or condition. Currently the check fires whenever `doc.get_toc()` returns an empty list and the page count exceeds 9. Change it so the issue is only flagged when the document has neither an `/Outlines` bookmark tree (empty `get_toc()`) nor heading tags in the StructTreeRoot. To do this: move the `is_tagged` pikepdf check and the `_extract_heading_sequence()` call to run before the bookmarks check, store the heading levels in a variable, and add a condition that skips the bookmarks flag when `is_tagged` is True and heading levels were found. Avoid calling `_extract_heading_sequence()` twice — reuse the result for the heading hierarchy check that currently follows it. Add a comment explaining the either-or rationale.
+
+---
+
 ---
